@@ -1,0 +1,35 @@
+{
+  "check": "decision",
+  "git": true,
+  "decision": "blocked",
+  "candidate": { "session": "implementer", "model": "model-a", "provider": "codex" },
+  "records": [
+    {
+      "specVersion": "0.1",
+      "recordType": "review",
+      "itemId": "adversarial-review",
+      "base": "$base",
+      "head": "$head",
+      "policyDigest": "$digest",
+      "attempt": 1,
+      "evaluator": { "name": "closeout-reference", "version": "$version" },
+      "producer": { "session": "implementer", "model": "model-b", "provider": "other" },
+      "findings": [
+        {
+          "severity": "P3",
+          "location": "src/lib.rs",
+          "explanation": "A note for later.",
+          "evidence": "The behavior under test still holds."
+        }
+      ],
+      "artifacts": []
+    }
+  ],
+  "items": [
+    {
+      "id": "adversarial-review",
+      "state": "independence",
+      "message": "reviewer does not satisfy differentSession"
+    }
+  ]
+}

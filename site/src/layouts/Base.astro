@@ -1,0 +1,43 @@
+---
+import "@fontsource/barlow/400.css";
+import "@fontsource/barlow/600.css";
+import "@fontsource/barlow-condensed/600.css";
+import "@fontsource/fragment-mono/400.css";
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+const documentTitle = title === "Closeout" ? "Closeout" : `${title} · Closeout`;
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{documentTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <a class="skip" href="#content">Skip to content</a>
+    <header class="frame">
+      <a class="mark" href="/">Closeout</a>
+      <nav aria-label="Pages">
+        <a href="/specification">Specification</a>
+        <a href="/schemas">Schemas</a>
+        <a href="/adopt">Adopt</a>
+      </nav>
+      <p class="edition">Draft 0.1</p>
+    </header>
+    <main id="content">
+      <slot />
+    </main>
+    <footer class="frame foot">
+      <p>Apache-2.0. The reference runner is the Rust binary <code>closeout</code>.</p>
+    </footer>
+  </body>
+</html>

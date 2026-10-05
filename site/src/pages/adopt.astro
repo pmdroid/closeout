@@ -1,0 +1,122 @@
+---
+import Base from "../layouts/Base.astro";
+---
+
+<Base
+  title="Adopt"
+  description="Run the Closeout reference runner and consult it from Claude Code, Codex, and OpenCode."
+>
+  <article class="prose">
+    <h1>Adopt the runner</h1>
+    <p>
+      The reference runner is the Rust crate in this repository, version 0.1.0, edition 2024. From a checkout:
+    </p>
+    <pre><code>cargo test
+cargo run --quiet -- validate
+cargo run --quiet -- run --gate beforePR --base &lt;base&gt; --head &lt;head&gt; --json</code></pre>
+    <p>Exit 0 means accepted. Exit 1 means a requirement failed. Exit 3 means acceptance is blocked. Exit 2 means the invocation is invalid.</p>
+
+    <h2>Decide</h2>
+    <pre><code>closeout decision \
+  --gate beforePR \
+  --base &lt;base-commit&gt; \
+  --head &lt;candidate-commit&gt; \
+  --candidate-session &lt;id&gt; \
+  --candidate-model &lt;id&gt; \
+  --json</code></pre>
+    <p>
+      <code>--candidate-session</code>, <code>--candidate-model</code>, and <code>--candidate-provider</code> are the candidate identity used for independence. An empty value does not satisfy a flag set to true.
+    </p>
+
+    <h2>Record a review</h2>
+    <pre><code>closeout evidence add \
+  --gate beforePR \
+  --item &lt;qualified-id&gt; \
+  --base &lt;base-commit&gt; \
+  --head &lt;candidate-commit&gt; \
+  --session &lt;reviewer-session&gt; \
+  --model &lt;reviewer-model&gt; \
+  --findings findings.json</code></pre>
+    <p><code>findings.json</code> is an array of finding objects. The command writes the next attempt. It does not decide acceptance.</p>
+
+    <h2>Read the policy from origin/main</h2>
+    <p>
+      <code>validate</code>, <code>run</code>, <code>decision</code>, and <code>evidence add</code> read <code>.agents/closeout.yaml</code> from the commit at <code>refs/heads/main</code> on the remote <code>origin</code>. The runner fetches that ref and checks it against the remote again. A local edit of <code>main</code>, of the work tree, or of the <code>origin/main</code> ref does not change the policy.
+    </p>
+
+    <h2>Try a draft</h2>
+    <pre><code>closeout try \
+  --gate beforePR \
+  --base &lt;base&gt; \
+  --head &lt;head&gt;</code></pre>
+    <p>
+      Put the draft at <code>~/.agents/closeout.yaml</code>. Imports and skills in that file resolve from the home directory. <code>try</code> prints the result and does not write a decision file.
+    </p>
+
+    <h2>Seal a report</h2>
+    <pre><code>closeout keygen --pgp --out keys
+closeout run \
+  --gate beforePR \
+  --base &lt;base&gt; \
+  --head &lt;head&gt; \
+  --format markdown \
+  --pgp-key keys/closeout-public.asc
+closeout verify \
+  --pgp-key keys/closeout-private.asc \
+  --head &lt;head&gt; \
+  report.asc</code></pre>
+    <p>
+      <code>run</code> encrypts the markdown with the public key. <code>verify</code> decrypts it with the private key and reprints the decision. The public key can seal any report. The private key is what reads the body. A hook does not treat a sealed file in the workspace as acceptance.
+    </p>
+
+    <h2>Verify on a pull request</h2>
+    <p>
+      Copy <code>examples/github/verify-sealed.yml</code> to <code>.github/workflows/verify-sealed.yml</code>. Store the private key in the <code>CLOSEOUT_PRIVATE_KEY</code> secret. The agent writes <code>closeout-report.asc</code> at the pull request head.
+    </p>
+    <p>
+      The workflow file comes from the default branch. The job reads that one report, installs <code>closeout</code> from the same branch, and runs <code>verify --require-accepted</code> for the pull request head. The sealed decision's policy digest has to match <code>origin/main</code>. The job leaves the pull request's own code unexecuted. When the check passes, it comments:
+    </p>
+    <pre><code>Closeout verified the sealed report for &lt;head&gt;.
+
+The proof check is valid and the decision is accepted.</code></pre>
+    <p>The comment includes the decision the private key decrypted. A failed check leaves no comment.</p>
+
+    <h2>Share verification artifacts in Kyoto</h2>
+    <p>
+      Kyoto publishes a real file through <code>attach_artifact</code>, keeps a copy with the session and displays a clickable attachment in chat during the turn. Useful verification files include screenshots, interaction videos, Markdown reports and actual terminal transcripts. Attach the observations that support the response. Ordinary answers can remain in chat.
+    </p>
+    <p>
+      For a public Closeout decision, run the reference runner against the committed candidate. Keep its actual exit status and decision, including failed or blocked outcomes. Its command records retain the candidate, policy, producer and attempt identities.
+    </p>
+    <pre><code>mkdir -p .closeout
+closeout run \
+  --gate beforePR \
+  --base &lt;base-commit&gt; \
+  --head &lt;candidate-commit&gt; \
+  --json &gt; .closeout/decision.json</code></pre>
+    <p>
+      Then create a portable copy of the recorded evidence and referenced files. The archive retains the paths relative to <code>.closeout/</code>.
+    </p>
+    <pre><code>tar -czf /tmp/closeout-evidence.tar.gz .closeout</code></pre>
+    <p>
+      Call <code>attach_artifact</code> with <code>/tmp/closeout-evidence.tar.gz</code> and share a short response that matches the recorded decision. The archive preserves the original records and log bytes. Its attachment hash verifies the downloaded archive; each evidence reference identifies its own file bytes. A client opens active HTML content through an explicit external action.
+    </p>
+
+    <h2>Plugins</h2>
+    <p>
+      The plugins call the <code>closeout</code> binary. They do not contain a second copy of the policy. <code>CLOSEOUT_BIN</code> selects the binary. <code>CLOSEOUT_BASE</code> selects the base revision. When it is unset, the hook uses the same commit for base and head.
+    </p>
+    <p>
+      Claude Code reads <code>.claude-plugin/marketplace.json</code>. The plugin is <code>plugins/claude</code>. Its Stop and TaskCompleted hooks run <code>hooks/consult.mjs</code>.
+    </p>
+    <p>
+      Codex reads <code>.agents/plugins/marketplace.json</code>. The plugin is <code>plugins/codex</code>. Its Stop hook runs the same consult script.
+    </p>
+    <p>
+      OpenCode loads a JavaScript file from <code>.opencode/plugins/</code>. The file in this repository is <code>plugins/opencode/closeout.js</code>. On session idle it can nudge the session at most three times for one head. It does not write an accepted decision.
+    </p>
+    <p>
+      If <code>stop_hook_active</code> is set, or <code>CLOSEOUT_HOOK=0</code>, the consult script exits 0 and does not treat that silence as acceptance. A missing binary blocks the hook. A repository with no policy file is left alone.
+    </p>
+  </article>
+</Base>

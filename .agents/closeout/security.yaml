@@ -1,0 +1,9 @@
+specVersion: "0.1"
+description: Requires Rust and Cargo. Checks that the committed Closeout policy loads under draft 0.1. The runner executes in a clean worktree at the candidate commit, so the first run compiles the crate there.
+
+items:
+  - id: validate
+    kind: command
+    gate: beforePR
+    exec: ["cargo", "run", "--quiet", "--", "validate"]
+    timeoutSeconds: 300

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'node \"$PLUGIN_ROOT/scripts/consult.mjs\"'"
+          }
+        ]
+      }
+    ]
+  }
+}

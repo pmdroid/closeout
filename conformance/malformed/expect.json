@@ -1,0 +1,5 @@
+{
+  "check": "validate",
+  "ok": false,
+  "messageContains": ".agents/closeout.yaml:"
+}

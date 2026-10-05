@@ -1,0 +1,28 @@
+{
+  "check": "decision",
+  "git": true,
+  "decision": "blocked",
+  "candidate": { "session": "implementer", "model": "", "provider": "codex" },
+  "records": [
+    {
+      "specVersion": "0.1",
+      "recordType": "review",
+      "itemId": "adversarial-review",
+      "base": "$base",
+      "head": "$head",
+      "policyDigest": "$digest",
+      "attempt": 1,
+      "evaluator": { "name": "closeout-reference", "version": "$version" },
+      "producer": { "session": "reviewer", "model": "", "provider": "other" },
+      "findings": [],
+      "artifacts": []
+    }
+  ],
+  "items": [
+    {
+      "id": "adversarial-review",
+      "state": "independence",
+      "message": "reviewer does not satisfy differentModel"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+specVersion: "0.1"
+items:
+  - id: typecheck
+    kind: command
+    gate: beforePR
+    exec: ["true"]
+    timeoutSeconds: 30
+  - id: typecheck
+    kind: command
+    gate: beforePR
+    exec: ["true"]
+    timeoutSeconds: 30

@@ -1,0 +1,24 @@
+mod canonical;
+mod evaluate;
+mod evidence;
+mod format;
+mod git;
+mod legacy;
+mod paths;
+mod policy;
+mod run;
+mod schema;
+mod seal;
+mod types;
+mod yaml_doc;
+
+pub use canonical::{canonical_json, digest_of, sha256_hex};
+pub use evaluate::{blocked_policy, evaluate, EvaluateInput};
+pub use evidence::{next_attempt, read_evidence, write_decision_file, write_log, write_record};
+pub use format::{decision_from_markdown, exit_status, format_decision, format_markdown};
+pub use seal::{generate_pgp_keys, open_report, seal_report};
+pub use git::resolve_commit;
+pub use policy::{canonical_policy_body, load_policy, load_policy_from_origin};
+pub use run::{changed_scope, run_commands, RunInput};
+pub use schema::{check_decision, check_evidence};
+pub use types::*;

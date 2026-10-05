@@ -1,0 +1,49 @@
+---
+import Base from "../layouts/Base.astro";
+import { repoFile } from "../lib/repo";
+
+const schemas = [
+  {
+    file: "schema/policy.schema.json",
+    lead: "A public policy file. specVersion is 0.1. The entry may list setup steps that run before the checks. Items are command or review, and the only gate is beforePR. An item or a setup step may list paths. The runner applies it only when the candidate changes a matching path.",
+  },
+  {
+    file: "schema/evidence.schema.json",
+    lead: "One evidence record. A command record carries the argv, the exit, and the producer. A review record carries findings and does not carry an outcome. Both records carry artifact path and SHA-256 references for verification files.",
+  },
+  {
+    file: "schema/decision.schema.json",
+    lead: "The acceptance decision for one gate, one base, and one head. The decision is accepted, rejected, or blocked.",
+  },
+];
+
+const documents = schemas.map((schema) => {
+  const raw = repoFile(schema.file);
+  const parsed = JSON.parse(raw) as { title: string; $id: string };
+  return { ...schema, raw, title: parsed.title, id: parsed.$id };
+});
+---
+
+<Base
+  title="Schemas"
+  description="JSON Schemas for a Closeout policy, an evidence record, and a decision."
+>
+  <article class="prose">
+    <h1>Schemas</h1>
+    <p>
+      Draft 0.1 uses JSON Schema draft 2020-12. Unknown fields are errors. A policy, an evidence record, and a decision each have a schema.
+    </p>
+    {
+      documents.map((document) => (
+        <section class="schema-block">
+          <h2>{document.title}</h2>
+          <p>{document.lead}</p>
+          <p>
+            <code>{document.id}</code>
+          </p>
+          <pre><code>{document.raw}</code></pre>
+        </section>
+      ))
+    }
+  </article>
+</Base>

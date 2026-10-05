@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:closeout:decision:0.1",
+  "title": "Closeout decision, draft 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specVersion", "decision", "gate", "base", "head", "candidate", "policy", "items", "warnings"],
+  "properties": {
+    "specVersion": { "const": "0.1" },
+    "decision": { "enum": ["accepted", "rejected", "blocked"] },
+    "gate": { "const": "beforePR" },
+    "base": { "type": "string" },
+    "head": { "type": "string" },
+    "message": { "type": "string", "maxLength": 4000 },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session", "model", "provider"],
+      "properties": {
+        "session": { "type": "string", "maxLength": 256 },
+        "model": { "type": "string", "maxLength": 256 },
+        "provider": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "legacy", "digest", "absent"],
+      "properties": {
+        "path": { "type": ["string", "null"] },
+        "legacy": { "type": "boolean" },
+        "digest": { "type": ["string", "null"] },
+        "absent": { "type": "boolean" }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "state", "message"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string" },
+          "state": {
+            "enum": ["passed", "failed", "missing", "stale", "unsupported", "independence", "untrusted", "invalid", "skipped"]
+          },
+          "message": { "type": "string" },
+          "attempt": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message"],
+        "properties": {
+          "code": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      }
+    }
+  }
+}

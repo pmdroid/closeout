@@ -1,0 +1,14 @@
+{
+  "name": "closeout",
+  "version": "0.1.0",
+  "description": "Consult the Closeout policy before work is accepted.",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Closeout",
+    "shortDescription": "Consult the repository acceptance policy before work is accepted.",
+    "developerName": "Closeout",
+    "category": "Productivity"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "closeout",
+  "description": "Plugins that consult a Closeout policy.",
+  "owner": {
+    "name": "Closeout"
+  },
+  "plugins": [
+    {
+      "name": "closeout",
+      "source": "./plugins/claude",
+      "description": "Consult the Closeout policy before work is accepted.",
+      "version": "0.1.0",
+      "license": "Apache-2.0"
+    }
+  ]
+}

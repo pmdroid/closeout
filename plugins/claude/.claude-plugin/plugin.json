@@ -1,0 +1,6 @@
+{
+  "name": "closeout",
+  "version": "0.1.0",
+  "description": "Consult the Closeout policy before work is accepted.",
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:closeout:policy:0.1",
+  "title": "Closeout policy document, draft 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specVersion"],
+  "properties": {
+    "specVersion": { "const": "0.1" },
+    "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "imports": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "as"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "as": { "$ref": "#/$defs/slug" }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/item" }
+    },
+    "setup": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/setupStep" }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+    },
+    "item": {
+      "oneOf": [{ "$ref": "#/$defs/command" }, { "$ref": "#/$defs/review" }]
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "gate", "exec", "timeoutSeconds"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "kind": { "const": "command" },
+        "gate": { "const": "beforePR" },
+        "exec": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "paths": { "$ref": "#/$defs/paths" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "gate", "skill", "independence", "failOn"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "kind": { "const": "review" },
+        "gate": { "const": "beforePR" },
+        "skill": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "independence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["differentSession", "differentModel"],
+          "properties": {
+            "differentSession": { "type": "boolean" },
+            "differentModel": { "type": "boolean" }
+          }
+        },
+        "failOn": { "enum": ["P0", "P1", "P2", "P3"] },
+        "paths": { "$ref": "#/$defs/paths" }
+      }
+    },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "setupStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "exec", "timeoutSeconds"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "exec": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "paths": { "$ref": "#/$defs/paths" }
+      }
+    }
+  }
+}

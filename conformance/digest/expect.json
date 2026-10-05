@@ -1,0 +1,4 @@
+{
+  "check": "digest",
+  "touch": ".agents/skills/adversarial-review/references/rubric.md"
+}

@@ -1,0 +1,5 @@
+{
+  "check": "validate",
+  "ok": false,
+  "message": "import cycle: .agents/closeout.yaml -> .agents/closeout/a.yaml -> .agents/closeout/b.yaml -> .agents/closeout/a.yaml"
+}

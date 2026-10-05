@@ -1,0 +1,12 @@
+{
+  "check": "decision",
+  "git": true,
+  "decision": "blocked",
+  "items": [
+    {
+      "id": "adversarial-review",
+      "state": "missing",
+      "message": "no evidence for this candidate and policy"
+    }
+  ]
+}

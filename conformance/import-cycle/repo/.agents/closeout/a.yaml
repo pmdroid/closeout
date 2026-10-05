@@ -1,0 +1,4 @@
+specVersion: "0.1"
+imports:
+  - path: .agents/closeout/b.yaml
+    as: b

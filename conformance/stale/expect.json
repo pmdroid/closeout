@@ -1,0 +1,27 @@
+{
+  "check": "decision",
+  "git": true,
+  "decision": "blocked",
+  "records": [
+    {
+      "specVersion": "0.1",
+      "recordType": "review",
+      "itemId": "adversarial-review",
+      "base": "$base",
+      "head": "0000000000000000000000000000000000000000",
+      "policyDigest": "$digest",
+      "attempt": 1,
+      "evaluator": { "name": "closeout-reference", "version": "$version" },
+      "producer": { "session": "reviewer", "model": "model-b", "provider": "other" },
+      "findings": [],
+      "artifacts": []
+    }
+  ],
+  "items": [
+    {
+      "id": "adversarial-review",
+      "state": "stale",
+      "message": "evidence is for a different candidate or policy"
+    }
+  ]
+}

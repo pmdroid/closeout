@@ -1,0 +1,15 @@
+specVersion: "0.1"
+description: Requires Rust and Cargo. The runner executes in a clean worktree at the candidate commit, so the first run compiles the crate there.
+
+items:
+  - id: check
+    kind: command
+    gate: beforePR
+    exec: ["cargo", "check", "--all-targets"]
+    timeoutSeconds: 300
+
+  - id: tests
+    kind: command
+    gate: beforePR
+    exec: ["cargo", "test"]
+    timeoutSeconds: 600

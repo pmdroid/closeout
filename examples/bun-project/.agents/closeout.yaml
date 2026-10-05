@@ -1,0 +1,17 @@
+specVersion: "0.1"
+
+description: Requires Bun and a typecheck script.
+
+imports:
+  - path: .agents/closeout/bun-quality.yaml
+    as: quality
+
+items:
+  - id: adversarial-review
+    kind: review
+    gate: beforePR
+    skill: .agents/skills/adversarial-review/SKILL.md
+    independence:
+      differentSession: true
+      differentModel: true
+    failOn: P1

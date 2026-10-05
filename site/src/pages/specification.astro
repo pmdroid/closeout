@@ -1,0 +1,16 @@
+---
+import { marked } from "marked";
+import Base from "../layouts/Base.astro";
+import { repoFile } from "../lib/repo";
+
+const source = repoFile("spec/0.1.md");
+
+const html = marked.parse(source, { async: false, gfm: true });
+---
+
+<Base
+  title="Specification"
+  description="Closeout Specification, Draft 0.1."
+>
+  <article class="doc" set:html={html} />
+</Base>

@@ -1,0 +1,5 @@
+{
+  "check": "validate",
+  "ok": false,
+  "message": "duplicate import name quality in .agents/closeout.yaml"
+}

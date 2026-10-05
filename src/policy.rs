@@ -1,0 +1,718 @@
+use crate::canonical::{digest_of, sha256_hex, utf16_cmp};
+use crate::legacy::map_legacy;
+use crate::paths::{check_path_patterns, is_slug, repo_path, to_posix};
+use crate::schema::check_policy;
+use crate::types::{Item, ItemBody, LoadResult, PolicyFile, ResolvedPolicy, Warning, LEGACY_POLICY_PATH, PUBLIC_POLICY_PATH, SPEC_VERSION};
+use crate::yaml_doc::read_yaml_file;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Deserialize)]
+struct PublicDocument {
+    #[serde(default)]
+    imports: Vec<PublicImport>,
+    #[serde(default)]
+    items: Vec<PublicItem>,
+    #[serde(default)]
+    setup: Vec<SetupStep>,
+}
+
+#[derive(Deserialize)]
+struct SetupStep {
+    id: String,
+    exec: Vec<String>,
+    #[serde(rename = "timeoutSeconds")]
+    timeout_seconds: u64,
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct PublicImport {
+    path: String,
+    #[serde(rename = "as")]
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind")]
+enum PublicItem {
+    #[serde(rename = "command")]
+    Command {
+        id: String,
+        exec: Vec<String>,
+        #[serde(rename = "timeoutSeconds")]
+        timeout_seconds: u64,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
+    #[serde(rename = "review")]
+    Review {
+        id: String,
+        skill: String,
+        independence: crate::types::Independence,
+        #[serde(rename = "failOn")]
+        fail_on: crate::types::Severity,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
+}
+
+impl PublicItem {
+    fn id(&self) -> &str {
+        match self {
+            Self::Command { id, .. } | Self::Review { id, .. } => id,
+        }
+    }
+}
+
+pub fn load_policy_from_origin(root: &Path) -> LoadResult {
+    let commit = match crate::git::origin_main(root) {
+        Ok(commit) => commit,
+        Err(message) => return invalid(&message),
+    };
+    let staged = match stage_origin_policy(root, &commit) {
+        Ok(staged) => staged,
+        Err(message) => return invalid(&message),
+    };
+    match load_policy(&staged.path) {
+        LoadResult::Ready(policy) if policy.absent => load_global_policy(),
+        other => other,
+    }
+}
+
+fn load_global_policy() -> LoadResult {
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return invalid("HOME is unset");
+    };
+    match load_policy(&PathBuf::from(home)) {
+        LoadResult::Ready(policy) if policy.absent => LoadResult::Ready(policy),
+        LoadResult::Ready(mut policy) => {
+            let shown = match policy.path.as_deref() {
+                Some(path) => format!("~/{path}"),
+                None => "~/.agents/closeout.yaml".to_string(),
+            };
+            policy.warnings.insert(
+                0,
+                Warning {
+                    code: "global-policy".to_string(),
+                    message: format!("Using {shown} because origin/main has no closeout policy."),
+                },
+            );
+            policy.path = Some(shown);
+            LoadResult::Ready(policy)
+        }
+        other => other,
+    }
+}
+
+pub fn load_policy(root: &Path) -> LoadResult {
+    let abs = match fs::canonicalize(root) {
+        Ok(path) if path.is_dir() => path,
+        _ => return invalid("policy root is not a directory"),
+    };
+    let public_file = abs.join(PUBLIC_POLICY_PATH);
+    let legacy_file = abs.join(LEGACY_POLICY_PATH);
+    let has_public = fs::metadata(&public_file).is_ok();
+    let has_legacy = fs::metadata(&legacy_file).is_ok();
+    if has_public && has_legacy {
+        return LoadResult::Failed {
+            code: "configuration-conflict",
+            message: "Configuration conflict: .agents/closeout.yaml and .acpdash/closeout.yaml both exist.".to_string(),
+            warnings: Vec::new(),
+        };
+    }
+    if !has_public && !has_legacy {
+        return LoadResult::Ready(ResolvedPolicy {
+            absent: true,
+            legacy: false,
+            path: None,
+            digest: None,
+            files: Vec::new(),
+            setup: Vec::new(),
+            items: Vec::new(),
+            warnings: Vec::new(),
+        });
+    }
+    if has_legacy {
+        let parsed = match read_yaml_file(&legacy_file) {
+            Ok(value) => value,
+            Err(message) => return invalid(&message),
+        };
+        let (items, warnings) = match map_legacy(&parsed) {
+            Ok(mapped) => mapped,
+            Err(message) => return invalid(&message),
+        };
+        let mut files = vec![match file_hash(&abs, LEGACY_POLICY_PATH) {
+            Ok(file) => file,
+            Err(message) => return invalid(&message),
+        }];
+        match skill_hashes(&abs, &items) {
+            Ok(skill_files) => files.extend(skill_files),
+            Err(message) => return invalid(&message),
+        }
+        return match finish(LEGACY_POLICY_PATH, true, unique_files(files), Vec::new(), items, warnings) {
+            Ok(policy) => LoadResult::Ready(policy),
+            Err(message) => invalid(&message),
+        };
+    }
+    let mut setup = Vec::new();
+    let mut items = Vec::new();
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    let mut ids = HashSet::new();
+    if let Err(message) = walk(&abs, PUBLIC_POLICY_PATH, "", &[], &mut seen, &mut setup, &mut items, &mut files, &mut ids) {
+        return invalid(&message);
+    }
+    match skill_hashes(&abs, &items) {
+        Ok(skill_files) => files.extend(skill_files),
+        Err(message) => return invalid(&message),
+    }
+    match finish(PUBLIC_POLICY_PATH, false, unique_files(files), setup, items, Vec::new()) {
+        Ok(policy) => LoadResult::Ready(policy),
+        Err(message) => invalid(&message),
+    }
+}
+
+pub fn canonical_policy_body(policy: &ResolvedPolicy) -> Result<String, String> {
+    crate::canonical::canonical_json(&policy_value(&policy.files, &policy.setup, &policy.items))
+}
+
+fn policy_value(files: &[PolicyFile], setup: &[Item], items: &[Item]) -> Value {
+    let mut body = json!({
+        "specVersion": SPEC_VERSION,
+        "files": files,
+        "items": items.iter().map(canonical_item).collect::<Vec<_>>(),
+    });
+    if !setup.is_empty() {
+        if let Value::Object(map) = &mut body {
+            map.insert("setup".to_string(), json!(setup.iter().map(canonical_item).collect::<Vec<_>>()));
+        }
+    }
+    body
+}
+
+fn finish(
+    path: &str,
+    legacy: bool,
+    mut files: Vec<PolicyFile>,
+    setup: Vec<Item>,
+    items: Vec<Item>,
+    warnings: Vec<Warning>,
+) -> Result<ResolvedPolicy, String> {
+    files.sort_by(|left, right| utf16_cmp(&left.path, &right.path));
+    let body = policy_value(&files, &setup, &items);
+    Ok(ResolvedPolicy {
+        absent: false,
+        legacy,
+        path: Some(path.to_string()),
+        digest: Some(digest_of(&body)?),
+        files,
+        setup,
+        items,
+        warnings,
+    })
+}
+
+fn canonical_item(item: &Item) -> Value {
+    let mut value = match &item.body {
+        ItemBody::Unsupported { kind } => json!({
+            "id": item.id,
+            "kind": kind,
+            "gate": item.gate.as_str(),
+            "supported": false,
+        }),
+        ItemBody::Command { exec, timeout_seconds } | ItemBody::Setup { exec, timeout_seconds } => json!({
+            "id": item.id,
+            "kind": item.kind_name(),
+            "gate": item.gate.as_str(),
+            "exec": exec,
+            "timeoutSeconds": timeout_seconds,
+        }),
+        ItemBody::Review {
+            skill,
+            independence,
+            fail_on,
+        } => {
+            let mut flags = serde_json::Map::new();
+            flags.insert("differentModel".to_string(), json!(independence.different_model));
+            flags.insert("differentSession".to_string(), json!(independence.different_session));
+            if independence.different_provider {
+                flags.insert("differentProvider".to_string(), json!(true));
+            }
+            json!({
+                "id": item.id,
+                "kind": "review",
+                "gate": item.gate.as_str(),
+                "skill": skill,
+                "independence": Value::Object(flags),
+                "failOn": fail_on,
+            })
+        }
+    };
+    if !item.paths.is_empty() {
+        if let Value::Object(map) = &mut value {
+            map.insert("paths".to_string(), json!(item.paths));
+        }
+    }
+    value
+}
+
+fn walk(
+    root: &Path,
+    path: &str,
+    prefix: &str,
+    stack: &[PathBuf],
+    seen_files: &mut HashSet<String>,
+    setup: &mut Vec<Item>,
+    items: &mut Vec<Item>,
+    files: &mut Vec<PolicyFile>,
+    ids: &mut HashSet<String>,
+) -> Result<(), String> {
+    let safe = repo_path(root, path).ok_or_else(|| format!("import path is not repository-relative: {path}"))?;
+    let absolute = root.join(&safe);
+    if stack.iter().any(|entry| entry == &absolute) {
+        let mut chain: Vec<&Path> = stack.iter().map(PathBuf::as_path).collect();
+        chain.push(&absolute);
+        let rendered = chain.iter().map(|entry| rel_posix(root, entry)).collect::<Vec<_>>().join(" -> ");
+        return Err(format!("import cycle: {rendered}"));
+    }
+    let file_meta = fs::metadata(&absolute).ok();
+    if !file_meta.as_ref().is_some_and(|meta| meta.is_file()) {
+        return Err(format!("import is missing: {safe}"));
+    }
+    let value = read_yaml_file(&absolute).map_err(|message| format!("{safe}: {message}"))?;
+    check_policy(&value).map_err(|message| format!("{safe}: {message}"))?;
+    let document: PublicDocument = serde_json::from_value(value).map_err(|err| format!("{safe}: {err}"))?;
+    if !prefix.is_empty() && !document.setup.is_empty() {
+        return Err("setup is only allowed on the entry policy".to_string());
+    }
+    if seen_files.insert(safe.clone()) {
+        files.push(file_hash(root, &safe)?);
+    }
+    let mut names = HashSet::new();
+    let mut child_stack = stack.to_vec();
+    child_stack.push(absolute);
+    for entry in &document.imports {
+        if !names.insert(entry.name.clone()) {
+            return Err(format!("duplicate import name {} in {safe}", entry.name));
+        }
+        let child_prefix = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}/{}", entry.name)
+        };
+        walk(root, &entry.path, &child_prefix, &child_stack, seen_files, setup, items, files, ids)?;
+    }
+    if prefix.is_empty() {
+        for step in &document.setup {
+            if !is_slug(&step.id) {
+                return Err(format!("invalid id {}", step.id));
+            }
+            if !ids.insert(step.id.clone()) {
+                return Err(format!("duplicate requirement id {}", step.id));
+            }
+            let mut item = Item::setup(step.id.clone(), step.exec.clone(), step.timeout_seconds);
+            item.paths = check_path_patterns(&step.paths)?;
+            setup.push(item);
+        }
+    }
+    for raw in &document.items {
+        let local = raw.id();
+        if !is_slug(local) {
+            return Err(format!("invalid id {local}"));
+        }
+        let id = if prefix.is_empty() { local.to_string() } else { format!("{prefix}/{local}") };
+        if !ids.insert(id.clone()) {
+            return Err(format!("duplicate requirement id {id}"));
+        }
+        match raw {
+            PublicItem::Command {
+                exec,
+                timeout_seconds,
+                paths,
+                ..
+            } => {
+                let mut item = Item::command(id, exec.clone(), *timeout_seconds);
+                item.paths = check_path_patterns(paths)?;
+                items.push(item);
+            }
+            PublicItem::Review {
+                skill,
+                independence,
+                fail_on,
+                paths,
+                ..
+            } => {
+                let Some(skill_path) = repo_path(root, skill).filter(|candidate| candidate.ends_with("/SKILL.md")) else {
+                    return Err(format!("skill path is not a repository SKILL.md: {skill}"));
+                };
+                let skill_file = root.join(&skill_path);
+                if !fs::metadata(&skill_file).is_ok_and(|meta| meta.is_file()) {
+                    return Err(format!("skill is missing: {skill_path}"));
+                }
+                let mut item = Item::review(id, skill_path, independence.clone(), *fail_on);
+                item.paths = check_path_patterns(paths)?;
+                items.push(item);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn skill_hashes(root: &Path, items: &[Item]) -> Result<Vec<PolicyFile>, String> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    for item in items {
+        let ItemBody::Review { skill, .. } = &item.body else {
+            continue;
+        };
+        let Some(skill_path) = repo_path(root, skill).filter(|candidate| candidate.ends_with("/SKILL.md")) else {
+            continue;
+        };
+        let skill_file = root.join(&skill_path);
+        if !fs::metadata(&skill_file).is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        let Some(dir) = skill_file.parent() else {
+            continue;
+        };
+        let dir_meta = fs::symlink_metadata(dir).map_err(|_| format!("skill is missing: {skill_path}"))?;
+        if dir_meta.file_type().is_symlink() {
+            return Err(format!("skill file is a symlink: {}", dir.display()));
+        }
+        for absolute in list_files(dir)? {
+            let rel = rel_posix(root, &absolute);
+            if !seen.insert(rel.clone()) {
+                continue;
+            }
+            files.push(file_hash(root, &rel)?);
+        }
+    }
+    Ok(files)
+}
+
+fn list_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = fs::read_dir(&current).map_err(|_| "could not read the skill directory".to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|_| "could not read the skill directory".to_string())?;
+            let absolute = entry.path();
+            let meta = fs::symlink_metadata(&absolute).map_err(|_| format!("skill file is a symlink: {}", absolute.display()))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!("skill file is a symlink: {}", absolute.display()));
+            }
+            if meta.is_dir() {
+                stack.push(absolute);
+            } else if meta.is_file() {
+                found.push(absolute);
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn file_hash(root: &Path, relative_path: &str) -> Result<PolicyFile, String> {
+    let bytes = fs::read(root.join(relative_path)).map_err(|_| "could not read the policy file".to_string())?;
+    Ok(PolicyFile {
+        path: relative_path.to_string(),
+        sha256: sha256_hex(&bytes),
+    })
+}
+
+fn unique_files(files: Vec<PolicyFile>) -> Vec<PolicyFile> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for file in files.into_iter().rev() {
+        if seen.insert(file.path.clone()) {
+            out.push(file);
+        }
+    }
+    out.reverse();
+    out
+}
+
+fn rel_posix(root: &Path, absolute: &Path) -> String {
+    absolute.strip_prefix(root).map(to_posix).unwrap_or_else(|_| absolute.display().to_string())
+}
+
+struct Staged {
+    path: PathBuf,
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn stage_origin_policy(repo: &Path, commit: &str) -> Result<Staged, String> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("closeout-policy-{}-{n}-{nanos}", std::process::id()));
+    fs::create_dir_all(&path).map_err(|_| "could not read the policy file".to_string())?;
+    let staged = Staged { path };
+    let mut pending = vec![PUBLIC_POLICY_PATH.to_string(), LEGACY_POLICY_PATH.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(relative) = pending.pop() {
+        if !seen.insert(relative.clone()) {
+            continue;
+        }
+        if repo_path(&staged.path, &relative).is_none() {
+            continue;
+        }
+        let blobs = crate::git::list_blobs(repo, commit, &relative)?;
+        let Some(blob) = blobs.iter().find(|blob| blob.path == relative) else {
+            continue;
+        };
+        if !regular_mode(&blob.mode) {
+            return Err(format!("policy path is not a file: {relative}"));
+        }
+        let bytes = crate::git::read_blob(repo, &blob.object)?;
+        write_rel(&staged.path, &relative, &bytes)?;
+        if relative.ends_with("/SKILL.md") {
+            if let Some(dir) = relative.rsplit_once('/').map(|(dir, _)| dir) {
+                copy_tree(repo, commit, &staged.path, dir)?;
+            }
+        }
+        if !relative.ends_with("/SKILL.md") {
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                if let Ok(value) = crate::yaml_doc::read_yaml_value(text) {
+                    enqueue_paths(&value, &mut pending);
+                }
+            }
+        }
+    }
+    Ok(staged)
+}
+
+fn copy_tree(repo: &Path, commit: &str, dest: &Path, dir: &str) -> Result<(), String> {
+    for blob in crate::git::list_blobs(repo, commit, dir)? {
+        if blob.mode == "120000" {
+            return Err(format!("skill file is a symlink: {}", blob.path));
+        }
+        if !regular_mode(&blob.mode) {
+            return Err(format!("skill path is not a file: {}", blob.path));
+        }
+        let bytes = crate::git::read_blob(repo, &blob.object)?;
+        write_rel(dest, &blob.path, &bytes)?;
+    }
+    Ok(())
+}
+
+fn enqueue_paths(value: &Value, pending: &mut Vec<String>) {
+    if let Some(imports) = value.get("imports").and_then(Value::as_array) {
+        for entry in imports {
+            if let Some(path) = entry.get("path").and_then(Value::as_str) {
+                pending.push(path.to_string());
+            }
+        }
+    }
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        for item in items {
+            if let Some(skill) = item.get("skill").and_then(Value::as_str) {
+                pending.push(skill.to_string());
+            }
+        }
+    }
+}
+
+fn regular_mode(mode: &str) -> bool {
+    mode == "100644" || mode == "100755"
+}
+
+fn write_rel(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
+    let Some(safe) = repo_path(root, relative) else {
+        return Err(format!("import path is not repository-relative: {relative}"));
+    };
+    let dest = root.join(safe);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|_| "could not read the policy file".to_string())?;
+    }
+    fs::write(dest, bytes).map_err(|_| "could not read the policy file".to_string())
+}
+
+fn invalid(message: &str) -> LoadResult {
+    LoadResult::Failed {
+        code: "policy-invalid",
+        message: message.to_string(),
+        warnings: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn this_repository_resolves_cargo_requirements() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        match load_policy(&root) {
+            LoadResult::Ready(policy) => {
+                let ids: Vec<_> = policy.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>();
+                assert_eq!(ids, ["testing/check", "testing/tests", "security/validate", "adversarial-review"]);
+                assert!(policy.digest.as_deref().unwrap_or("").starts_with("sha256:"));
+                assert!(policy.files.iter().any(|file| file.path.ends_with("references/rubric.md")));
+                assert!(policy.items.iter().all(|item| item.paths.is_empty()));
+                let body = canonical_policy_body(&policy).unwrap();
+                assert!(!body.contains("\"paths\""));
+                assert!(!body.contains("\"setup\""));
+            }
+            LoadResult::Failed { message, .. } => panic!("{message}"),
+        }
+    }
+
+    #[test]
+    fn optional_paths_load_and_escape_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join(".agents/skills/look")).unwrap();
+        fs::write(root.join(".agents/skills/look/SKILL.md"), "look\n").unwrap();
+        fs::write(
+            root.join(".agents/closeout.yaml"),
+            r#"specVersion: "0.1"
+items:
+  - id: engine
+    kind: command
+    gate: beforePR
+    exec: ["true"]
+    timeoutSeconds: 30
+    paths: ["src/**", "apps/engine/"]
+  - id: look
+    kind: review
+    gate: beforePR
+    skill: .agents/skills/look/SKILL.md
+    independence:
+      differentSession: false
+      differentModel: false
+    failOn: P1
+    paths: ["src/**"]
+"#,
+        )
+        .unwrap();
+        let policy = match load_policy(root) {
+            LoadResult::Ready(policy) => policy,
+            LoadResult::Failed { message, .. } => panic!("{message}"),
+        };
+        assert_eq!(policy.items[0].paths, ["src/**", "apps/engine/"]);
+        assert_eq!(policy.items[1].paths, ["src/**"]);
+        let body: Value = serde_json::from_str(&canonical_policy_body(&policy).unwrap()).unwrap();
+        assert_eq!(body["items"][0]["paths"], json!(["src/**", "apps/engine/"]));
+
+        fs::write(
+            root.join(".agents/closeout.yaml"),
+            "specVersion: \"0.1\"\nitems:\n  - id: engine\n    kind: command\n    gate: beforePR\n    exec: [\"true\"]\n    timeoutSeconds: 30\n    paths: [\"../secret\"]\n",
+        )
+        .unwrap();
+        match load_policy(root) {
+            LoadResult::Failed { message, .. } => assert!(message.contains("path pattern is invalid: ../secret"), "{message}"),
+            LoadResult::Ready(_) => panic!("escape should fail"),
+        }
+
+        fs::write(
+            root.join(".agents/closeout.yaml"),
+            "specVersion: \"0.1\"\nitems:\n  - id: engine\n    kind: command\n    gate: beforePR\n    exec: [\"true\"]\n    timeoutSeconds: 30\n    paths: []\n",
+        )
+        .unwrap();
+        assert!(matches!(load_policy(root), LoadResult::Failed { .. }));
+
+        fs::remove_file(root.join(".agents/closeout.yaml")).unwrap();
+        fs::create_dir_all(root.join(".acpdash")).unwrap();
+        fs::write(
+            root.join(".acpdash/closeout.yaml"),
+            "version: 1\nitems:\n  - id: engine\n    kind: command\n    run: \"false\"\n    paths: [\"src/**\"]\n  - id: ci\n    kind: ci\n    paths: [\"apps/engine/**\"]\n",
+        )
+        .unwrap();
+        let legacy = match load_policy(root) {
+            LoadResult::Ready(policy) => policy,
+            LoadResult::Failed { message, .. } => panic!("{message}"),
+        };
+        assert!(legacy.legacy);
+        assert_eq!(legacy.items[0].paths, ["src/**"]);
+        assert_eq!(legacy.items[1].paths, ["apps/engine/**"]);
+        assert!(matches!(legacy.items[1].body, ItemBody::Unsupported { .. }));
+    }
+
+    #[test]
+    fn setup_loads_on_the_entry_and_keeps_the_canonical_digest_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join(".agents/closeout")).unwrap();
+        fs::write(
+            root.join(".agents/closeout.yaml"),
+            r#"specVersion: "0.1"
+setup:
+  - id: js
+    exec: ["bun", "install"]
+    timeoutSeconds: 600
+  - id: worker
+    paths: ["apps/worker/**"]
+    exec: ["make", "-C", "apps/worker", "install"]
+    timeoutSeconds: 1800
+items:
+  - id: markdown
+    kind: command
+    gate: beforePR
+    exec: ["make", "check-markdown"]
+    timeoutSeconds: 120
+"#,
+        )
+        .unwrap();
+        let policy = match load_policy(root) {
+            LoadResult::Ready(policy) => policy,
+            LoadResult::Failed { message, .. } => panic!("{message}"),
+        };
+        assert_eq!(policy.setup.len(), 2);
+        assert_eq!(policy.setup[0].id, "js");
+        assert_eq!(policy.setup[0].kind_name(), "setup");
+        assert!(policy.setup[0].paths.is_empty());
+        assert_eq!(policy.setup[1].paths, ["apps/worker/**"]);
+        let body: Value = serde_json::from_str(&canonical_policy_body(&policy).unwrap()).unwrap();
+        assert_eq!(body["setup"][0]["kind"], "setup");
+        assert_eq!(body["setup"][0]["gate"], "beforePR");
+        assert_eq!(body["setup"][0]["exec"], json!(["bun", "install"]));
+        assert_eq!(body["setup"][0]["timeoutSeconds"], json!(600));
+        assert!(body["setup"][0].get("paths").is_none());
+        assert_eq!(body["setup"][1]["paths"], json!(["apps/worker/**"]));
+        assert_eq!(body["setup"][1]["id"], "worker");
+
+        fs::write(root.join(".agents/closeout.yaml"), "specVersion: \"0.1\"\nsetup: []\n").unwrap();
+        match load_policy(root) {
+            LoadResult::Failed { message, .. } => assert!(message.contains("setup"), "{message}"),
+            LoadResult::Ready(_) => panic!("empty setup should fail"),
+        }
+
+        fs::write(
+            root.join(".agents/closeout.yaml"),
+            "specVersion: \"0.1\"\nsetup:\n  - id: markdown\n    exec: [\"true\"]\n    timeoutSeconds: 30\nitems:\n  - id: markdown\n    kind: command\n    gate: beforePR\n    exec: [\"true\"]\n    timeoutSeconds: 30\n",
+        )
+        .unwrap();
+        match load_policy(root) {
+            LoadResult::Failed { message, .. } => assert!(message.contains("duplicate requirement id markdown"), "{message}"),
+            LoadResult::Ready(_) => panic!("duplicate id should fail"),
+        }
+
+        fs::write(
+            root.join(".agents/closeout/extra.yaml"),
+            "specVersion: \"0.1\"\nsetup:\n  - id: js\n    exec: [\"true\"]\n    timeoutSeconds: 30\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".agents/closeout.yaml"),
+            "specVersion: \"0.1\"\nimports:\n  - path: .agents/closeout/extra.yaml\n    as: extra\n",
+        )
+        .unwrap();
+        match load_policy(root) {
+            LoadResult::Failed { message, .. } => assert_eq!(message, "setup is only allowed on the entry policy"),
+            LoadResult::Ready(_) => panic!("imported setup should fail"),
+        }
+    }
+}

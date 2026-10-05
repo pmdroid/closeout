@@ -1,0 +1,7 @@
+specVersion: "0.1"
+items:
+  - id: lint
+    kind: command
+    gate: beforePR
+    exec: ["true"]
+    timeoutSeconds: 30

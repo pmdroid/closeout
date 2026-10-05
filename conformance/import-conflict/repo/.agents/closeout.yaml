@@ -1,0 +1,6 @@
+specVersion: "0.1"
+imports:
+  - path: .agents/closeout/quality.yaml
+    as: quality
+  - path: .agents/closeout/other.yaml
+    as: quality

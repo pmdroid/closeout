@@ -1,0 +1,5 @@
+{
+  "check": "validate",
+  "ok": false,
+  "message": "import path is not repository-relative: ../secret.yaml"
+}

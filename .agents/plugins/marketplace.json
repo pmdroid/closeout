@@ -1,0 +1,20 @@
+{
+  "name": "closeout",
+  "interface": {
+    "displayName": "Closeout"
+  },
+  "plugins": [
+    {
+      "name": "closeout",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "check": "validate",
+  "ok": false,
+  "message": "duplicate requirement id quality/typecheck"
+}

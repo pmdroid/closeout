@@ -1,0 +1,97 @@
+---
+import Base from "../layouts/Base.astro";
+
+const rows = [
+  ["testing/check", "passed", "exited 0"],
+  ["testing/tests", "passed", "exited 0"],
+  ["security/validate", "passed", "exited 0"],
+  ["adversarial-review", "missing", "no evidence for this candidate and policy"],
+];
+---
+
+<Base
+  title="Closeout"
+  description="An open specification for declaring what must be verified before an agent's work can be accepted."
+>
+  <section class="board">
+    <h1>Accept the work when the evidence says so.</h1>
+    <p class="lead">
+      Closeout is an open specification for declaring what must be verified before an agent's work can be accepted, and recording the evidence used to make that decision.
+    </p>
+    <table class="departures">
+      <caption>
+        Example beforePR decision for this repository. The review has no evidence, so the gate is blocked.
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Requirement</th>
+          <th scope="col">State</th>
+          <th scope="col">Record</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          rows.map(([id, state, record]) => (
+            <tr>
+              <th scope="row">{id}</th>
+              <td class:list={["state", state === "passed" ? "passed" : "held"]}>{state}</td>
+              <td>{record}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+    <p class="verdict">blocked</p>
+    <div class="rail">
+      <a class="action" href="/specification">Read the specification</a>
+      <a class="action" href="/adopt">Adopt the runner</a>
+    </div>
+
+    <h2>The file is the requirement</h2>
+    <p>
+      Commit <code>.agents/closeout.yaml</code> in the repository under review. Imports add requirements under a prefix. A skill becomes a requirement only when the policy names it. If the file is absent, there are no requirements. When the base and the head both resolve, that decision is accepted. If the file is present and does not load, acceptance is blocked.
+    </p>
+
+    <h2>Commands run at the candidate</h2>
+    <p>
+      A command requirement is an argv. The reference runner checks out that commit in a detached git worktree, runs the argv there, and deletes the worktree. A line in chat that says the tests passed is not command evidence. A review requirement stores findings. The runner computes the outcome from those findings and the independence flags.
+    </p>
+
+    <h2>Same inputs, same decision</h2>
+    <p>
+      The effective policy, the candidate commit, and the evidence determine acceptance. Two models do not have to write the same review. Their findings are judged against the policy. A change to the candidate, or to a file the policy hashes, makes earlier evidence stale.
+    </p>
+
+    <h2>What the runner returns</h2>
+    <table class="exits">
+      <caption>Exit status of <code>closeout decision</code> and <code>closeout run</code>.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Exit</th>
+          <th scope="col">Decision</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>0</td>
+          <td>accepted</td>
+        </tr>
+        <tr>
+          <td>1</td>
+          <td>rejected</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td>blocked</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td>the invocation is invalid</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      Bring your own agent and orchestrator. Commit the requirements once under <code>.agents</code>, and use them wherever the work runs. A session hook can consult the decision. It does not open a pull request. The orchestrator checks the current decision at that boundary.
+    </p>
+  </section>
+</Base>

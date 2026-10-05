@@ -1,0 +1,35 @@
+{
+  "check": "decision",
+  "git": true,
+  "decision": "rejected",
+  "candidate": { "session": "implementer", "model": "model-a", "provider": "codex" },
+  "records": [
+    {
+      "specVersion": "0.1",
+      "recordType": "review",
+      "itemId": "adversarial-review",
+      "base": "$base",
+      "head": "$head",
+      "policyDigest": "$digest",
+      "attempt": 1,
+      "evaluator": { "name": "closeout-reference", "version": "$version" },
+      "producer": { "session": "reviewer", "model": "model-b", "provider": "other" },
+      "findings": [
+        {
+          "severity": "P1",
+          "location": "src/lib.rs",
+          "explanation": "The requirement fails open.",
+          "evidence": "An empty reviewer model is treated as independent."
+        }
+      ],
+      "artifacts": []
+    }
+  ],
+  "items": [
+    {
+      "id": "adversarial-review",
+      "state": "failed",
+      "message": "finding at P1 meets failOn P1"
+    }
+  ]
+}

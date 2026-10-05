@@ -1,0 +1,17 @@
+{
+  "name": "closeout-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@fontsource/barlow": "^5.2.8",
+    "@fontsource/barlow-condensed": "^5.2.8",
+    "@fontsource/fragment-mono": "^5.2.8",
+    "astro": "^5.16.15",
+    "marked": "^16.4.1"
+  }
+}

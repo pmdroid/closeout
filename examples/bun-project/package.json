@@ -1,0 +1,9 @@
+{
+  "name": "bun-project",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

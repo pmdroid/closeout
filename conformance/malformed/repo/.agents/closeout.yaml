@@ -1,0 +1,5 @@
+specVersion: "0.1"
+items:
+  - id: check
+    kind: nope
+    gate: beforePR

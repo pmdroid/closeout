@@ -1,0 +1,72 @@
+name: Verify sealed closeout report
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the runner
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: runner
+
+      - name: Fetch the sealed report
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git -C runner fetch --depth=1 origin "pull/${PR_NUMBER}/head:pr-head"
+          git -C runner show pr-head:closeout-report.asc > "$RUNNER_TEMP/closeout-report.asc"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install closeout from the default branch
+        run: cargo install --path runner --locked --root "$RUNNER_TEMP/closeout"
+
+      - name: Verify the sealed report
+        env:
+          CLOSEOUT_PRIVATE_KEY: ${{ secrets.CLOSEOUT_PRIVATE_KEY }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$CLOSEOUT_PRIVATE_KEY" > "$RUNNER_TEMP/closeout-private.asc"
+          "$RUNNER_TEMP/closeout/bin/closeout" verify \
+            --pgp-key "$RUNNER_TEMP/closeout-private.asc" \
+            --head "$HEAD_SHA" \
+            --require-accepted \
+            "$RUNNER_TEMP/closeout-report.asc" > "$RUNNER_TEMP/decision.txt"
+          rm -f "$RUNNER_TEMP/closeout-private.asc"
+
+      - name: Check the policy digest
+        run: |
+          set -euo pipefail
+          digest=$("$RUNNER_TEMP/closeout/bin/closeout" validate --root runner --json | python3 -c 'import json,sys; value=json.load(sys.stdin).get("digest"); print(value or "none")')
+          grep -qxF "policy ${digest}" "$RUNNER_TEMP/decision.txt"
+
+      - name: Comment on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Closeout verified the sealed report for \`$HEAD_SHA\`."
+            echo
+            echo "The proof check is valid and the decision is accepted."
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/decision.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/comment.md"
+          gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body-file "$RUNNER_TEMP/comment.md"
