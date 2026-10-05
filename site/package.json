@@ -13,6 +13,7 @@
     "@fontsource/barlow-condensed": "^5.2.8",
     "@fontsource/fragment-mono": "^5.2.8",
     "astro": "^5.16.15",
-    "marked": "^16.4.1"
+    "marked": "^16.4.1",
+    "sharp": "^0.34.5"
   }
 }
