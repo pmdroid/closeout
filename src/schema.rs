@@ -6,10 +6,6 @@ pub fn check_policy(value: &Value) -> Result<(), String> {
     check(policy_validator(), value)
 }
 
-pub fn check_legacy(value: &Value) -> Result<(), String> {
-    check(legacy_validator(), value)
-}
-
 pub fn check_evidence(value: &Value) -> Result<(), String> {
     check(evidence_validator(), value)
 }
@@ -38,11 +34,6 @@ fn schema_errors(validator: &Validator, instance: &Value) -> String {
 fn policy_validator() -> &'static Validator {
     static CELL: OnceLock<Validator> = OnceLock::new();
     CELL.get_or_init(|| compile(include_str!("../schema/policy.schema.json")))
-}
-
-fn legacy_validator() -> &'static Validator {
-    static CELL: OnceLock<Validator> = OnceLock::new();
-    CELL.get_or_init(|| compile(include_str!("../schema/legacy-acpdash.schema.json")))
 }
 
 fn evidence_validator() -> &'static Validator {

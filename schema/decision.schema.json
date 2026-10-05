@@ -25,10 +25,9 @@
     "policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "legacy", "digest", "absent"],
+      "required": ["path", "digest", "absent"],
       "properties": {
         "path": { "type": ["string", "null"] },
-        "legacy": { "type": "boolean" },
         "digest": { "type": ["string", "null"] },
         "absent": { "type": "boolean" }
       }

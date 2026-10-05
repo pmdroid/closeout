@@ -1,5 +1,0 @@
-{
-  "check": "validate",
-  "ok": false,
-  "message": "Configuration conflict: .agents/closeout.yaml and .acpdash/closeout.yaml both exist."
-}

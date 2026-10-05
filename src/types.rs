@@ -4,8 +4,6 @@ pub const SPEC_VERSION: &str = "0.1";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PRODUCER_NAME: &str = "closeout-reference";
 pub const PUBLIC_POLICY_PATH: &str = ".agents/closeout.yaml";
-pub const LEGACY_POLICY_PATH: &str = ".acpdash/closeout.yaml";
-pub const LEGACY_COMMAND_TIMEOUT_SECONDS: u64 = 120;
 pub const OUTPUT_CAP_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,8 +58,6 @@ pub struct Independence {
     pub different_session: bool,
     #[serde(rename = "differentModel")]
     pub different_model: bool,
-    #[serde(default, rename = "differentProvider")]
-    pub different_provider: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,7 +153,6 @@ pub struct PolicyFile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedPolicy {
     pub absent: bool,
-    pub legacy: bool,
     pub path: Option<String>,
     pub digest: Option<String>,
     pub files: Vec<PolicyFile>,
@@ -383,7 +378,6 @@ impl DecisionName {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyInfo {
     pub path: Option<String>,
-    pub legacy: bool,
     pub digest: Option<String>,
     pub absent: bool,
 }

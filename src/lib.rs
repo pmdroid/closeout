@@ -3,7 +3,6 @@ mod evaluate;
 mod evidence;
 mod format;
 mod git;
-mod legacy;
 mod paths;
 mod policy;
 mod run;

@@ -27,7 +27,6 @@ pub fn evaluate(input: EvaluateInput<'_>) -> Decision {
         candidate: input.candidate.clone(),
         policy: PolicyInfo {
             path: input.policy.path.clone(),
-            legacy: input.policy.legacy,
             digest: input.policy.digest.clone(),
             absent: input.policy.absent,
         },
@@ -90,7 +89,6 @@ pub fn blocked_policy(message: &str, gate: Gate, candidate: Candidate) -> Decisi
         candidate,
         policy: PolicyInfo {
             path: None,
-            legacy: false,
             digest: None,
             absent: false,
         },
@@ -280,9 +278,6 @@ fn independence_failure(independence: &crate::types::Independence, record: &Revi
     if independence.different_model && !distinct(&candidate.model, &record.producer.model) {
         return Some("reviewer does not satisfy differentModel".to_string());
     }
-    if independence.different_provider && !distinct(&candidate.provider, &record.producer.provider) {
-        return Some("reviewer does not satisfy differentProvider".to_string());
-    }
     None
 }
 
@@ -298,7 +293,6 @@ mod tests {
     fn policy(items: Vec<Item>) -> ResolvedPolicy {
         ResolvedPolicy {
             absent: false,
-            legacy: false,
             path: Some(".agents/closeout.yaml".to_string()),
             digest: Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
             files: Vec::new(),
@@ -429,7 +423,7 @@ mod tests {
         let item = Item::review(
             "adversarial-review",
             ".agents/skills/adversarial-review/SKILL.md",
-            Independence { different_session: true, different_model: true, different_provider: false },
+            Independence { different_session: true, different_model: true },
             Severity::P1,
         );
         let loaded = policy(vec![item]);
@@ -462,7 +456,6 @@ mod tests {
     fn absent_policy_is_accepted() {
         let loaded = ResolvedPolicy {
             absent: true,
-            legacy: false,
             path: None,
             digest: None,
             files: Vec::new(),

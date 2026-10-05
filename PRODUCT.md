@@ -22,7 +22,7 @@ Closeout declares what must be verified before an agent's work can be accepted, 
 
 ## Positioning
 
-Closeout is an open specification for declaring what must be verified before an agent's work can be accepted, and recording the evidence used to make that decision. ACPDash is one consumer of that file. The format does not belong to ACPDash.
+Closeout is an open specification for declaring what must be verified before an agent's work can be accepted, and recording the evidence used to make that decision.
 
 ## Operating Context
 

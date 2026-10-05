@@ -710,7 +710,6 @@ fn changed_scope_reads_a_diff_only_when_an_item_has_paths() {
     fs::create_dir_all(&bare).unwrap();
     let unscoped = closeout::ResolvedPolicy {
         absent: false,
-        legacy: false,
         path: Some(".agents/closeout.yaml".to_string()),
         digest: None,
         files: Vec::new(),
@@ -976,7 +975,6 @@ fn sealed_markdown_reports() {
         candidate: Candidate::default(),
         policy: PolicyInfo {
             path: Some(".agents/closeout.yaml".to_string()),
-            legacy: false,
             digest: Some(format!("sha256:{}", "ab".repeat(32))),
             absent: false,
         },

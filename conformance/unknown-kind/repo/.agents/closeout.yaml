@@ -1,0 +1,5 @@
+specVersion: "0.1"
+items:
+  - id: ci
+    kind: ci
+    gate: beforePR

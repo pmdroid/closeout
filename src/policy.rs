@@ -1,8 +1,7 @@
 use crate::canonical::{digest_of, sha256_hex, utf16_cmp};
-use crate::legacy::map_legacy;
 use crate::paths::{check_path_patterns, is_slug, repo_path, to_posix};
 use crate::schema::check_policy;
-use crate::types::{Item, ItemBody, LoadResult, PolicyFile, ResolvedPolicy, Warning, LEGACY_POLICY_PATH, PUBLIC_POLICY_PATH, SPEC_VERSION};
+use crate::types::{Item, ItemBody, LoadResult, PolicyFile, ResolvedPolicy, Warning, PUBLIC_POLICY_PATH, SPEC_VERSION};
 use crate::yaml_doc::read_yaml_file;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -117,20 +116,9 @@ pub fn load_policy(root: &Path) -> LoadResult {
         _ => return invalid("policy root is not a directory"),
     };
     let public_file = abs.join(PUBLIC_POLICY_PATH);
-    let legacy_file = abs.join(LEGACY_POLICY_PATH);
-    let has_public = fs::metadata(&public_file).is_ok();
-    let has_legacy = fs::metadata(&legacy_file).is_ok();
-    if has_public && has_legacy {
-        return LoadResult::Failed {
-            code: "configuration-conflict",
-            message: "Configuration conflict: .agents/closeout.yaml and .acpdash/closeout.yaml both exist.".to_string(),
-            warnings: Vec::new(),
-        };
-    }
-    if !has_public && !has_legacy {
+    if fs::metadata(&public_file).is_err() {
         return LoadResult::Ready(ResolvedPolicy {
             absent: true,
-            legacy: false,
             path: None,
             digest: None,
             files: Vec::new(),
@@ -138,28 +126,6 @@ pub fn load_policy(root: &Path) -> LoadResult {
             items: Vec::new(),
             warnings: Vec::new(),
         });
-    }
-    if has_legacy {
-        let parsed = match read_yaml_file(&legacy_file) {
-            Ok(value) => value,
-            Err(message) => return invalid(&message),
-        };
-        let (items, warnings) = match map_legacy(&parsed) {
-            Ok(mapped) => mapped,
-            Err(message) => return invalid(&message),
-        };
-        let mut files = vec![match file_hash(&abs, LEGACY_POLICY_PATH) {
-            Ok(file) => file,
-            Err(message) => return invalid(&message),
-        }];
-        match skill_hashes(&abs, &items) {
-            Ok(skill_files) => files.extend(skill_files),
-            Err(message) => return invalid(&message),
-        }
-        return match finish(LEGACY_POLICY_PATH, true, unique_files(files), Vec::new(), items, warnings) {
-            Ok(policy) => LoadResult::Ready(policy),
-            Err(message) => invalid(&message),
-        };
     }
     let mut setup = Vec::new();
     let mut items = Vec::new();
@@ -173,7 +139,7 @@ pub fn load_policy(root: &Path) -> LoadResult {
         Ok(skill_files) => files.extend(skill_files),
         Err(message) => return invalid(&message),
     }
-    match finish(PUBLIC_POLICY_PATH, false, unique_files(files), setup, items, Vec::new()) {
+    match finish(PUBLIC_POLICY_PATH, unique_files(files), setup, items, Vec::new()) {
         Ok(policy) => LoadResult::Ready(policy),
         Err(message) => invalid(&message),
     }
@@ -199,7 +165,6 @@ fn policy_value(files: &[PolicyFile], setup: &[Item], items: &[Item]) -> Value {
 
 fn finish(
     path: &str,
-    legacy: bool,
     mut files: Vec<PolicyFile>,
     setup: Vec<Item>,
     items: Vec<Item>,
@@ -209,7 +174,6 @@ fn finish(
     let body = policy_value(&files, &setup, &items);
     Ok(ResolvedPolicy {
         absent: false,
-        legacy,
         path: Some(path.to_string()),
         digest: Some(digest_of(&body)?),
         files,
@@ -242,9 +206,6 @@ fn canonical_item(item: &Item) -> Value {
             let mut flags = serde_json::Map::new();
             flags.insert("differentModel".to_string(), json!(independence.different_model));
             flags.insert("differentSession".to_string(), json!(independence.different_session));
-            if independence.different_provider {
-                flags.insert("differentProvider".to_string(), json!(true));
-            }
             json!({
                 "id": item.id,
                 "kind": "review",
@@ -460,7 +421,7 @@ fn stage_origin_policy(repo: &Path, commit: &str) -> Result<Staged, String> {
     let path = std::env::temp_dir().join(format!("closeout-policy-{}-{n}-{nanos}", std::process::id()));
     fs::create_dir_all(&path).map_err(|_| "could not read the policy file".to_string())?;
     let staged = Staged { path };
-    let mut pending = vec![PUBLIC_POLICY_PATH.to_string(), LEGACY_POLICY_PATH.to_string()];
+    let mut pending = vec![PUBLIC_POLICY_PATH.to_string()];
     let mut seen = HashSet::new();
     while let Some(relative) = pending.pop() {
         if !seen.insert(relative.clone()) {
@@ -645,21 +606,7 @@ items:
         .unwrap();
         assert!(matches!(load_policy(root), LoadResult::Failed { .. }));
 
-        fs::remove_file(root.join(".agents/closeout.yaml")).unwrap();
-        fs::create_dir_all(root.join(".acpdash")).unwrap();
-        fs::write(
-            root.join(".acpdash/closeout.yaml"),
-            "version: 1\nitems:\n  - id: engine\n    kind: command\n    run: \"false\"\n    paths: [\"src/**\"]\n  - id: ci\n    kind: ci\n    paths: [\"apps/engine/**\"]\n",
-        )
-        .unwrap();
-        let legacy = match load_policy(root) {
-            LoadResult::Ready(policy) => policy,
-            LoadResult::Failed { message, .. } => panic!("{message}"),
-        };
-        assert!(legacy.legacy);
-        assert_eq!(legacy.items[0].paths, ["src/**"]);
-        assert_eq!(legacy.items[1].paths, ["apps/engine/**"]);
-        assert!(matches!(legacy.items[1].body, ItemBody::Unsupported { .. }));
+
     }
 
     #[test]

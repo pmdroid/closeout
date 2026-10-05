@@ -2,7 +2,7 @@
 
 Closeout is an open specification for declaring what must be verified before an agent's work can be accepted, and recording the evidence used to make that decision.
 
-Commit the requirements in `.agents/closeout.yaml` on the remote `origin` branch `main`. The runner reads that commit. `closeout try` evaluates a draft at `~/.agents/closeout.yaml` and does not write a decision. The reference runner, a CI job, ACPDash, or another orchestrator can read the same policy and reach the same decision from the same evidence.
+Commit the requirements in `.agents/closeout.yaml` on the remote `origin` branch `main`. The runner reads that commit. `closeout try` evaluates a draft at `~/.agents/closeout.yaml` and does not write a decision. The reference runner, a CI job, or an orchestrator can read the same policy and reach the same decision from the same evidence.
 
 ```bash
 cargo test

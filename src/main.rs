@@ -153,7 +153,6 @@ fn validate(flags: &Flags) -> Result<(), String> {
                     "specVersion": SPEC_VERSION,
                     "ok": true,
                     "absent": policy.absent,
-                    "legacy": policy.legacy,
                     "path": policy.path,
                     "digest": policy.digest,
                     "items": policy.items.iter().map(|item| &item.id).collect::<Vec<_>>(),
