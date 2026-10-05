@@ -204,6 +204,9 @@ fn retry_limits_stop_execution_and_configure_commit_resets() {
         assert_eq!(fourth.status.code(), Some(3));
         assert_eq!(fs::read_to_string(&counter).unwrap().len(), if scope == "task" { 2 } else { 3 });
         if scope == "task" {
+            let waiting = closeout(&repo, &["decision", "--gate", "beforePR", "--base", "HEAD", "--head", "HEAD", "--task", "task-two", "--json"]);
+            let waiting: Value = serde_json::from_slice(&waiting.stdout).unwrap();
+            assert_eq!(waiting["items"][0]["state"], "missing");
             let next_task = closeout(&repo, &["run", "--gate", "beforePR", "--base", "HEAD", "--head", "HEAD", "--task", "task-two", "--json"]);
             assert_eq!(next_task.status.code(), Some(1));
             assert_eq!(fs::read_to_string(&counter).unwrap().len(), 3);
