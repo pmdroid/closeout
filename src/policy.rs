@@ -571,6 +571,27 @@ mod tests {
     }
 
     #[test]
+    fn only_the_public_entry_is_loaded() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join(".acpdash")).unwrap();
+        fs::write(root.join(".acpdash/closeout.yaml"), "version: 1\nitems: []\n").unwrap();
+        let LoadResult::Ready(policy) = load_policy(root) else {
+            panic!("policy should load");
+        };
+        assert!(policy.absent);
+        assert!(policy.warnings.is_empty());
+        fs::create_dir_all(root.join(".agents")).unwrap();
+        fs::write(root.join(".agents/closeout.yaml"), "specVersion: \"0.1\"\n").unwrap();
+        let LoadResult::Ready(policy) = load_policy(root) else {
+            panic!("public policy should load");
+        };
+        assert!(!policy.absent);
+        assert_eq!(policy.path.as_deref(), Some(PUBLIC_POLICY_PATH));
+        assert!(policy.warnings.is_empty());
+    }
+
+    #[test]
     fn optional_paths_load_and_escape_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
