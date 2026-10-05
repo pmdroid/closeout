@@ -138,7 +138,9 @@ fn judge(item: &Item, input: &EvaluateInput<'_>) -> ItemResult {
         .filter(|record| input.policy.retry.as_ref().is_none_or(|retry| retry.scope != RetryScope::Task || record.task() == input.candidate.task))
         .collect();
     if matching.is_empty() {
-        let any = input.records.iter().any(|record| record.item_id() == item.id);
+        let any = input.records.iter().any(|record| {
+            record.item_id() == item.id && input.policy.retry.as_ref().is_none_or(|retry| retry.scope != RetryScope::Task || record.task() == input.candidate.task)
+        });
         return ItemResult {
             id: item.id.clone(),
             kind: item.kind_name().to_string(),
