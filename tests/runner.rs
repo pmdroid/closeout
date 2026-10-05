@@ -165,6 +165,48 @@ fn substitute(value: &mut Value, base: &str, head: &str, digest: &str) {
 }
 
 #[test]
+fn retry_limits_stop_execution_and_configure_commit_resets() {
+    for scope in ["task", "candidate"] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let counter = temp.path().join("attempts");
+        fs::create_dir_all(repo.join(".agents")).unwrap();
+        let policy = serde_json::json!({
+            "specVersion": "0.1",
+            "retry": { "maxFailedAttemptsPerItem": 2, "scope": scope },
+            "items": [{
+                "id": "check", "kind": "command", "gate": "beforePR",
+                "exec": ["sh", "-c", "printf x >> \"$1\"; exit 1", "closeout", counter],
+                "timeoutSeconds": 30
+            }]
+        });
+        fs::write(repo.join(".agents/closeout.yaml"), policy.to_string()).unwrap();
+        commit_repo(&repo);
+        publish_origin(&repo);
+        let base = resolve_commit(&repo, "HEAD").unwrap();
+        let args = ["run", "--gate", "beforePR", "--base", &base, "--head", "HEAD", "--task", "task-one", "--json"];
+        let first = closeout(&repo, &args);
+        assert_eq!(first.status.code(), Some(1), "{}", String::from_utf8_lossy(&first.stdout));
+        git(&repo, &["commit", "--allow-empty", "-m", "next candidate"]);
+        let second = closeout(&repo, &args);
+        assert_eq!(second.status.code(), Some(if scope == "task" { 3 } else { 1 }));
+        let third = closeout(&repo, &args);
+        assert_eq!(third.status.code(), Some(3));
+        let decision: Value = serde_json::from_slice(&third.stdout).unwrap();
+        assert_eq!(decision["items"][0]["state"], "exhausted");
+        assert!(decision["items"][0]["message"].as_str().unwrap().contains("ask for help"));
+        let fourth = closeout(&repo, &args);
+        assert_eq!(fourth.status.code(), Some(3));
+        assert_eq!(fs::read_to_string(&counter).unwrap().len(), if scope == "task" { 2 } else { 3 });
+        if scope == "task" {
+            let next_task = closeout(&repo, &["run", "--gate", "beforePR", "--base", &base, "--head", "HEAD", "--task", "task-two", "--json"]);
+            assert_eq!(next_task.status.code(), Some(1));
+            assert_eq!(fs::read_to_string(&counter).unwrap().len(), 3);
+        }
+    }
+}
+
+#[test]
 fn commands_run_in_a_detached_worktree() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
