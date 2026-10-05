@@ -46,6 +46,7 @@ if (!head || !base) {
 
 const bin = process.env.CLOSEOUT_BIN || "closeout";
 const args = ["decision", "--gate", "beforePR", "--base", base, "--head", head, "--root", root, "--json"];
+if (process.env.CLOSEOUT_TASK) args.push("--task", process.env.CLOSEOUT_TASK);
 const session = input.session_id || input.sessionId || "";
 if (session) args.push("--candidate-session", String(session));
 if (typeof input.model === "string" && input.model.length > 0) args.push("--candidate-model", input.model);
@@ -71,4 +72,9 @@ for (const item of decision.items || []) {
   if (item.state === "skipped") continue;
   lines.push(`${item.id}  ${item.state}  ${item.message}`);
 }
-finish(lines.join("\n"));
+const reason = lines.join("\n");
+if (event !== "TaskCompleted" && (decision.items || []).some((item) => item.state === "exhausted")) {
+  process.stdout.write(`${JSON.stringify({ systemMessage: reason })}\n`);
+  process.exit(0);
+}
+finish(reason);

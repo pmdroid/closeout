@@ -52,4 +52,10 @@ if (mode === "rejected") {
   process.exit(0);
 }
 
+if (mode === "exhausted") {
+  if (prompts.length !== 1) process.exit(14);
+  if (!prompts[0].body.parts[0].text.includes("ask for help")) process.exit(15);
+  process.exit(0);
+}
+
 process.exit(12);

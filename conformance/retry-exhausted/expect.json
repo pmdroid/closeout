@@ -1,0 +1,23 @@
+{
+  "check": "decision",
+  "git": true,
+  "decision": "blocked",
+  "records": [{
+    "specVersion": "0.1",
+    "recordType": "command",
+    "itemId": "check",
+    "base": "$base",
+    "head": "$head",
+    "policyDigest": "$digest",
+    "attempt": 1,
+    "evaluator": { "name": "closeout-reference", "version": "$version" },
+    "producer": { "name": "closeout-reference", "version": "$version" },
+    "exec": { "argv": ["false"], "exitCode": 1, "timedOut": false, "dirty": false, "headMoved": false, "durationMs": 1, "truncated": false },
+    "artifacts": []
+  }],
+  "items": [{
+    "id": "check",
+    "state": "exhausted",
+    "message": "1 of 1 allowed failed attempts used. Stop retrying and ask for help."
+  }]
+}

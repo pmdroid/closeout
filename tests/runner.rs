@@ -185,6 +185,11 @@ fn retry_limits_stop_execution_and_configure_commit_resets() {
         publish_origin(&repo);
         let base = resolve_commit(&repo, "HEAD").unwrap();
         let args = ["run", "--gate", "beforePR", "--base", &base, "--head", "HEAD", "--task", "task-one", "--json"];
+        if scope == "task" {
+            let missing_task = closeout(&repo, &["run", "--gate", "beforePR", "--base", &base, "--head", "HEAD", "--json"]);
+            assert_eq!(missing_task.status.code(), Some(3));
+            assert!(!counter.exists());
+        }
         let first = closeout(&repo, &args);
         assert_eq!(first.status.code(), Some(1), "{}", String::from_utf8_lossy(&first.stdout));
         git(&repo, &["commit", "--allow-empty", "-m", "next candidate"]);
@@ -199,11 +204,78 @@ fn retry_limits_stop_execution_and_configure_commit_resets() {
         assert_eq!(fourth.status.code(), Some(3));
         assert_eq!(fs::read_to_string(&counter).unwrap().len(), if scope == "task" { 2 } else { 3 });
         if scope == "task" {
-            let next_task = closeout(&repo, &["run", "--gate", "beforePR", "--base", &base, "--head", "HEAD", "--task", "task-two", "--json"]);
+            let next_task = closeout(&repo, &["run", "--gate", "beforePR", "--base", "HEAD", "--head", "HEAD", "--task", "task-two", "--json"]);
             assert_eq!(next_task.status.code(), Some(1));
             assert_eq!(fs::read_to_string(&counter).unwrap().len(), 3);
+            let still_exhausted = closeout(&repo, &["decision", "--gate", "beforePR", "--base", "HEAD", "--head", "HEAD", "--task", "task-one", "--json"]);
+            assert_eq!(still_exhausted.status.code(), Some(3));
+            let result: Value = serde_json::from_slice(&still_exhausted.stdout).unwrap();
+            assert_eq!(result["items"][0]["state"], "exhausted");
         }
     }
+}
+
+#[test]
+fn exhausted_review_budget_refuses_more_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join(".agents/skills/review")).unwrap();
+    fs::write(repo.join(".agents/skills/review/SKILL.md"), "Review the change.\n").unwrap();
+    fs::write(repo.join(".agents/closeout.yaml"), r#"specVersion: "0.1"
+retry:
+  maxFailedAttemptsPerItem: 1
+  scope: task
+items:
+  - id: review
+    kind: review
+    gate: beforePR
+    skill: .agents/skills/review/SKILL.md
+    independence:
+      differentSession: false
+      differentModel: false
+    failOn: P1
+"#).unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+    let findings = temp.path().join("findings.json");
+    fs::write(&findings, r#"[{"severity":"P1","location":"file","explanation":"fails","evidence":"failure"}]"#).unwrap();
+    let args = ["evidence", "add", "--gate", "beforePR", "--item", "review", "--base", "HEAD", "--head", "HEAD", "--task", "task-one", "--session", "reviewer", "--model", "model", "--findings", findings.to_str().unwrap()];
+    assert_eq!(closeout(&repo, &args).status.code(), Some(0));
+    fs::write(&findings, "[]").unwrap();
+    let refused = closeout(&repo, &args);
+    assert_eq!(refused.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("ask for help"));
+    assert_eq!(read_evidence(&repo.join(".closeout")).unwrap().len(), 1);
+}
+
+#[test]
+fn concurrent_runs_cannot_spend_the_same_retry_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let counter = temp.path().join("attempts");
+    fs::create_dir_all(repo.join(".agents")).unwrap();
+    fs::write(repo.join(".agents/closeout.yaml"), serde_json::json!({
+        "specVersion": "0.1", "retry": { "maxFailedAttemptsPerItem": 1, "scope": "task" },
+        "items": [{"id": "check", "kind": "command", "gate": "beforePR", "timeoutSeconds": 30,
+            "exec": ["sh", "-c", "printf x >> \"$1\"; sleep 1; exit 1", "closeout", counter]}]
+    }).to_string()).unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+    let args = ["run", "--gate", "beforePR", "--base", "HEAD", "--head", "HEAD", "--task", "task-one", "--json"];
+    let first = Command::new(env!("CARGO_BIN_EXE_closeout")).args(args).arg("--root").arg(&repo)
+        .stdout(std::process::Stdio::null()).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !counter.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(counter.exists());
+    let concurrent = closeout(&repo, &args);
+    assert_eq!(concurrent.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&concurrent.stderr).contains("retry budget"));
+    let mut first = first;
+    assert_eq!(first.wait().unwrap().code(), Some(3));
+    assert_eq!(fs::read_to_string(counter).unwrap(), "x");
+    assert_eq!(read_evidence(&repo.join(".closeout")).unwrap().len(), 1);
 }
 
 #[test]
@@ -752,6 +824,7 @@ fn changed_scope_reads_a_diff_only_when_an_item_has_paths() {
     fs::create_dir_all(&bare).unwrap();
     let unscoped = closeout::ResolvedPolicy {
         absent: false,
+        retry: None,
         path: Some(".agents/closeout.yaml".to_string()),
         digest: None,
         files: Vec::new(),

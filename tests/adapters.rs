@@ -213,6 +213,25 @@ fn hook_blocks_when_the_runner_is_missing_or_the_decision_is_not_accepted() {
 }
 
 #[test]
+fn exhausted_budget_allows_stopping_but_blocks_task_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = policy_repo(temp.path());
+    let stub = write_stub(temp.path(), "printf '%s\\n' '{\"decision\":\"blocked\",\"items\":[{\"id\":\"check\",\"state\":\"exhausted\",\"message\":\"Stop retrying and ask for help.\"}]}'; exit 3");
+    let cwd = serde_json::to_string(repo.to_str().unwrap()).unwrap();
+    let stop = consult(&repo, &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"), Some(&stub), &[]);
+    assert_eq!(stop.status.code(), Some(0));
+    let output: Value = serde_json::from_slice(&stop.stdout).unwrap();
+    assert!(output.get("decision").is_none());
+    assert!(output["systemMessage"].as_str().unwrap().contains("ask for help"));
+    let task = consult(&repo, &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"TaskCompleted\"}}"), Some(&stub), &[]);
+    assert_eq!(task.status.code(), Some(2));
+    let nudged = Command::new("node").arg(manifest().join("tests/opencode_check.mjs"))
+        .env("PLUGIN", manifest().join("plugins/opencode/closeout.js"))
+        .env("ROOT", &repo).env("MODE", "exhausted").env("CALLS", "4").env("CLOSEOUT_BIN", &stub).output().unwrap();
+    assert_eq!(nudged.status.code(), Some(0), "{}", String::from_utf8_lossy(&nudged.stderr));
+}
+
+#[test]
 fn opencode_plugin_nudges_a_blocked_head_and_stops_at_three() {
     let temp = tempfile::tempdir().unwrap();
     let empty = temp.path().join("empty");

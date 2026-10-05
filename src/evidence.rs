@@ -1,11 +1,22 @@
 use crate::canonical::sha256_hex;
 use crate::paths::to_posix;
 use crate::schema::check_evidence;
-use crate::types::{Decision, EvidenceRecord};
+use crate::types::{Decision, EvidenceRecord, RetryPolicy};
 use serde_json::Value;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+pub fn lock_retry_budget(dir: &Path, retry: Option<&RetryPolicy>) -> Result<Option<fs::File>, String> {
+    if retry.is_none() {
+        return Ok(None);
+    }
+    fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+    let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("retry.lock"))
+        .map_err(|err| err.to_string())?;
+    file.try_lock().map_err(|_| "another attempt is using the retry budget".to_string())?;
+    Ok(Some(file))
+}
 
 pub fn read_evidence(dir: &Path) -> Result<Vec<EvidenceRecord>, String> {
     let folder = dir.join("evidence");
@@ -28,10 +39,10 @@ pub fn read_evidence(dir: &Path) -> Result<Vec<EvidenceRecord>, String> {
     Ok(records)
 }
 
-pub fn next_attempt(records: &[EvidenceRecord], item_id: &str, base: &str, head: &str, digest: &str) -> u64 {
+pub fn next_attempt(records: &[EvidenceRecord], item_id: &str, head: &str, digest: &str) -> u64 {
     records
         .iter()
-        .filter(|record| record.item_id() == item_id && record.base() == base && record.head() == head && record.policy_digest() == digest)
+        .filter(|record| record.item_id() == item_id && record.head() == head && record.policy_digest() == digest)
         .map(|record| record.attempt())
         .max()
         .map_or(1, |attempt| attempt.saturating_add(1))

@@ -5,7 +5,7 @@ import { repoFile } from "../lib/repo";
 const schemas = [
   {
     file: "schema/policy.schema.json",
-    lead: "A public policy file. specVersion is 0.1. The entry may list setup steps that run before the checks. Items are command or review, and the only gate is beforePR. An item or a setup step may list paths. The runner applies it only when the candidate changes a matching path.",
+    lead: "A public policy file. specVersion is 0.1. The entry may list setup steps and a retry limit per requirement, counted by task or candidate. Items are command or review, and the only gate is beforePR. An item or a setup step may list paths. The runner applies it only when the candidate changes a matching path.",
   },
   {
     file: "schema/evidence.schema.json",

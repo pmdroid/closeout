@@ -44,6 +44,7 @@
       "properties": {
         "specVersion": { "const": "0.1" },
         "recordType": { "const": "command" },
+        "task": { "type": "string", "minLength": 1, "maxLength": 256 },
         "itemId": { "type": "string", "minLength": 1, "maxLength": 256 },
         "base": { "$ref": "#/$defs/sha" },
         "head": { "$ref": "#/$defs/sha" },
@@ -96,6 +97,7 @@
       "properties": {
         "specVersion": { "const": "0.1" },
         "recordType": { "const": "review" },
+        "task": { "type": "string", "minLength": 1, "maxLength": 256 },
         "itemId": { "type": "string", "minLength": 1, "maxLength": 256 },
         "base": { "$ref": "#/$defs/sha" },
         "head": { "$ref": "#/$defs/sha" },

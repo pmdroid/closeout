@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use closeout::{
     blocked_policy, check_decision, check_evidence, decision_from_markdown, evaluate, exit_status, format_decision,
     format_markdown, generate_pgp_keys, load_policy, load_policy_from_origin, next_attempt, open_report, read_evidence,
-    changed_scope, resolve_commit, run_commands,
+    changed_scope, lock_retry_budget, resolve_commit, retry_block, retry_task_error, run_commands,
     seal_report, write_decision_file, write_record, Candidate, Decision, EvidenceRecord, EvaluateInput, Gate, ItemBody,
     LoadResult, RunInput, PRODUCER_NAME, SPEC_VERSION, VERSION,
 };
@@ -14,13 +14,13 @@ use std::process;
 
 const USAGE: &str = "\
 closeout validate [--root dir] [--json]
-closeout run --gate beforePR --base rev --head rev [--root dir] [--evidence-dir dir] [--json]
+closeout run --gate beforePR --base rev --head rev [--task id] [--root dir] [--evidence-dir dir] [--json]
 closeout run --gate beforePR --base rev --head rev --format markdown --pgp-key <public-key> [--root dir] [--evidence-dir dir]
-closeout decision --gate beforePR --base rev --head rev [--root dir] [--evidence-dir dir] [--json]
-closeout try --gate beforePR --base rev --head rev [--root dir] [--json]
+closeout decision --gate beforePR --base rev --head rev [--task id] [--root dir] [--evidence-dir dir] [--json]
+closeout try --gate beforePR --base rev --head rev [--task id] [--root dir] [--json]
 closeout verify --pgp-key <private-key> --head <commit> [--require-accepted] <report>
 closeout keygen --pgp --out <dir>
-closeout evidence add --gate beforePR --item id --base rev --head rev --session id --model id --findings file [--provider id]";
+closeout evidence add --gate beforePR --item id --base rev --head rev --session id --model id --findings file [--task id] [--provider id]";
 
 #[derive(Parser)]
 #[command(name = "closeout", override_usage = USAGE, disable_help_subcommand = true)]
@@ -50,6 +50,8 @@ enum EvidenceAction {
 
 #[derive(Args)]
 struct Flags {
+    #[arg(long)]
+    task: Option<String>,
     #[arg(long)]
     json: bool,
     #[arg(long)]
@@ -314,9 +316,9 @@ fn evidence_add(flags: &AddFlags) -> Result<(), String> {
         }
         LoadResult::Ready(policy) => policy,
     };
-    if !policy.items.iter().any(|item| item.id == item_id && item.gate == gate && matches!(item.body, ItemBody::Review { .. })) {
+    let Some(item) = policy.items.iter().find(|item| item.id == item_id && item.gate == gate && matches!(item.body, ItemBody::Review { .. })) else {
         fail_usage(&format!("no review requirement {item_id} at {}", gate.as_str()));
-    }
+    };
     let Some(digest) = policy.digest.clone() else {
         eprintln!("base or head does not resolve to a commit");
         process::exit(3);
@@ -341,6 +343,11 @@ fn evidence_add(flags: &AddFlags) -> Result<(), String> {
         fail_usage("findings file must be a JSON array");
     }
     let dir = evidence_dir(&root, &flags.flags.evidence_dir);
+    let candidate = candidate_from(&flags.flags);
+    if let Some(message) = retry_task_error(&policy, &candidate) {
+        return Err(message);
+    }
+    let _retry_lock = lock_retry_budget(&dir, policy.retry.as_ref())?;
     let existing = match read_evidence(&dir) {
         Ok(records) => records,
         Err(message) => {
@@ -348,14 +355,17 @@ fn evidence_add(flags: &AddFlags) -> Result<(), String> {
             process::exit(3);
         }
     };
-    let record = json!({
+    if let Some(result) = retry_block(&policy, item, &base, &head, &candidate, &existing) {
+        return Err(result.message);
+    }
+    let mut record = json!({
         "specVersion": SPEC_VERSION,
         "recordType": "review",
         "itemId": item_id,
         "base": base,
         "head": head,
         "policyDigest": digest,
-        "attempt": next_attempt(&existing, &item_id, &base, &head, &digest),
+        "attempt": next_attempt(&existing, &item_id, &head, &digest),
         "evaluator": {"name": PRODUCER_NAME, "version": VERSION},
         "producer": {
             "session": session,
@@ -365,6 +375,9 @@ fn evidence_add(flags: &AddFlags) -> Result<(), String> {
         "findings": findings,
         "artifacts": [],
     });
+    if !candidate.task.is_empty() {
+        record["task"] = json!(candidate.task);
+    }
     if let Err(message) = check_evidence(&record) {
         eprintln!("findings are invalid: {message}");
         process::exit(3);
@@ -556,6 +569,7 @@ fn emit(decision: &Decision, json: bool) -> ! {
 
 fn candidate_from(flags: &Flags) -> Candidate {
     Candidate {
+        task: flags.task.clone().unwrap_or_default(),
         session: flags.candidate_session.clone().unwrap_or_default(),
         model: flags.candidate_model.clone().unwrap_or_default(),
         provider: flags.candidate_provider.clone().unwrap_or_default(),

@@ -1,5 +1,5 @@
-use crate::evaluate::{evaluate, EvaluateInput};
-use crate::evidence::{next_attempt, read_evidence, write_log, write_record};
+use crate::evaluate::{evaluate, retry_block, retry_task_error, EvaluateInput};
+use crate::evidence::{lock_retry_budget, next_attempt, read_evidence, write_log, write_record};
 use crate::git::{capture, changed_paths, git, porcelain, resolve_commit};
 use crate::paths::any_path_matches;
 use crate::types::{
@@ -50,6 +50,14 @@ pub fn run_commands(input: &RunInput) -> Result<Decision, String> {
     }
     let base = base_sha.unwrap_or_default();
     let head = head_sha.unwrap_or_default();
+    if let Some(message) = retry_task_error(&input.policy, &input.candidate) {
+        return Ok(evaluate(EvaluateInput {
+            policy: &input.policy, gate: input.gate, base: &base, head: &head,
+            candidate: &input.candidate, records: &[], changed_paths: None,
+            evidence_error: Some(message),
+        }));
+    }
+    let _retry_lock = lock_retry_budget(&input.evidence_dir, input.policy.retry.as_ref())?;
     let changed = match changed_scope(&input.root, &input.policy, input.gate, &base, &head) {
         Ok(paths) => paths,
         Err(message) => {
@@ -176,11 +184,15 @@ fn run_step(
     let (ItemBody::Command { exec, timeout_seconds } | ItemBody::Setup { exec, timeout_seconds }) = &item.body else {
         return Ok(false);
     };
-    let attempt = next_attempt(records, &item.id, base, head, digest);
+    if retry_block(&input.policy, item, base, head, &input.candidate, records).is_some() {
+        return Ok(matches!(item.body, ItemBody::Setup { .. }));
+    }
+    let attempt = next_attempt(records, &item.id, head, digest);
     let executed = execute(cwd, exec, *timeout_seconds, head);
     let (log_path, log_hash) = write_log(&input.evidence_dir, digest, head, &item.id, attempt, &executed.log)?;
     let failed = executed.timed_out || executed.head_moved || executed.exit_code != Some(0);
     let record = EvidenceRecord::Command(CommandRecord {
+        task: input.candidate.task.clone(),
         spec_version: SPEC_VERSION.to_string(),
         item_id: item.id.clone(),
         base: base.to_string(),

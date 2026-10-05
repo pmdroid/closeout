@@ -153,12 +153,27 @@ pub struct PolicyFile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedPolicy {
     pub absent: bool,
+    pub retry: Option<RetryPolicy>,
     pub path: Option<String>,
     pub digest: Option<String>,
     pub files: Vec<PolicyFile>,
     pub setup: Vec<Item>,
     pub items: Vec<Item>,
     pub warnings: Vec<Warning>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    #[serde(rename = "maxFailedAttemptsPerItem")]
+    pub max_failed_attempts_per_item: u64,
+    pub scope: RetryScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RetryScope {
+    Task,
+    Candidate,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,6 +188,8 @@ pub enum LoadResult {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task: String,
     pub session: String,
     pub model: String,
     pub provider: String,
@@ -181,6 +198,7 @@ pub struct Candidate {
 impl Default for Candidate {
     fn default() -> Self {
         Self {
+            task: String::new(),
             session: String::new(),
             model: String::new(),
             provider: String::new(),
@@ -225,6 +243,8 @@ pub struct ExecInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRecord {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task: String,
     #[serde(rename = "specVersion")]
     pub spec_version: String,
     #[serde(rename = "itemId")]
@@ -249,6 +269,8 @@ pub struct ReviewProducer {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRecord {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task: String,
     #[serde(rename = "specVersion")]
     pub spec_version: String,
     #[serde(rename = "itemId")]
@@ -274,6 +296,13 @@ pub enum EvidenceRecord {
 }
 
 impl EvidenceRecord {
+    pub fn task(&self) -> &str {
+        match self {
+            Self::Command(record) => &record.task,
+            Self::Review(record) => &record.task,
+        }
+    }
+
     pub fn item_id(&self) -> &str {
         match self {
             Self::Command(record) => &record.item_id,
@@ -313,6 +342,7 @@ impl EvidenceRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ItemState {
+    Exhausted,
     Passed,
     Failed,
     Missing,
@@ -327,6 +357,7 @@ pub enum ItemState {
 impl ItemState {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Exhausted => "exhausted",
             Self::Passed => "passed",
             Self::Failed => "failed",
             Self::Missing => "missing",
@@ -342,7 +373,7 @@ impl ItemState {
     pub fn blocks(self) -> bool {
         matches!(
             self,
-            Self::Missing | Self::Stale | Self::Unsupported | Self::Independence | Self::Untrusted | Self::Invalid
+            Self::Exhausted | Self::Missing | Self::Stale | Self::Unsupported | Self::Independence | Self::Untrusted | Self::Invalid
         )
     }
 }

@@ -1,7 +1,7 @@
 use crate::canonical::{digest_of, sha256_hex, utf16_cmp};
 use crate::paths::{check_path_patterns, is_slug, repo_path, to_posix};
 use crate::schema::check_policy;
-use crate::types::{Item, ItemBody, LoadResult, PolicyFile, ResolvedPolicy, Warning, PUBLIC_POLICY_PATH, SPEC_VERSION};
+use crate::types::{Item, ItemBody, LoadResult, PolicyFile, ResolvedPolicy, RetryPolicy, Warning, PUBLIC_POLICY_PATH, SPEC_VERSION};
 use crate::yaml_doc::read_yaml_file;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize)]
 struct PublicDocument {
+    retry: Option<RetryPolicy>,
     #[serde(default)]
     imports: Vec<PublicImport>,
     #[serde(default)]
@@ -119,6 +120,7 @@ pub fn load_policy(root: &Path) -> LoadResult {
     if fs::metadata(&public_file).is_err() {
         return LoadResult::Ready(ResolvedPolicy {
             absent: true,
+            retry: None,
             path: None,
             digest: None,
             files: Vec::new(),
@@ -128,33 +130,37 @@ pub fn load_policy(root: &Path) -> LoadResult {
         });
     }
     let mut setup = Vec::new();
+    let mut retry = None;
     let mut items = Vec::new();
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     let mut ids = HashSet::new();
-    if let Err(message) = walk(&abs, PUBLIC_POLICY_PATH, "", &[], &mut seen, &mut setup, &mut items, &mut files, &mut ids) {
+    if let Err(message) = walk(&abs, PUBLIC_POLICY_PATH, "", &[], &mut seen, &mut retry, &mut setup, &mut items, &mut files, &mut ids) {
         return invalid(&message);
     }
     match skill_hashes(&abs, &items) {
         Ok(skill_files) => files.extend(skill_files),
         Err(message) => return invalid(&message),
     }
-    match finish(PUBLIC_POLICY_PATH, unique_files(files), setup, items, Vec::new()) {
+    match finish(PUBLIC_POLICY_PATH, retry, unique_files(files), setup, items, Vec::new()) {
         Ok(policy) => LoadResult::Ready(policy),
         Err(message) => invalid(&message),
     }
 }
 
 pub fn canonical_policy_body(policy: &ResolvedPolicy) -> Result<String, String> {
-    crate::canonical::canonical_json(&policy_value(&policy.files, &policy.setup, &policy.items))
+    crate::canonical::canonical_json(&policy_value(policy.retry.as_ref(), &policy.files, &policy.setup, &policy.items))
 }
 
-fn policy_value(files: &[PolicyFile], setup: &[Item], items: &[Item]) -> Value {
+fn policy_value(retry: Option<&RetryPolicy>, files: &[PolicyFile], setup: &[Item], items: &[Item]) -> Value {
     let mut body = json!({
         "specVersion": SPEC_VERSION,
         "files": files,
         "items": items.iter().map(canonical_item).collect::<Vec<_>>(),
     });
+    if let Some(retry) = retry {
+        body["retry"] = json!(retry);
+    }
     if !setup.is_empty() {
         if let Value::Object(map) = &mut body {
             map.insert("setup".to_string(), json!(setup.iter().map(canonical_item).collect::<Vec<_>>()));
@@ -165,15 +171,17 @@ fn policy_value(files: &[PolicyFile], setup: &[Item], items: &[Item]) -> Value {
 
 fn finish(
     path: &str,
+    retry: Option<RetryPolicy>,
     mut files: Vec<PolicyFile>,
     setup: Vec<Item>,
     items: Vec<Item>,
     warnings: Vec<Warning>,
 ) -> Result<ResolvedPolicy, String> {
     files.sort_by(|left, right| utf16_cmp(&left.path, &right.path));
-    let body = policy_value(&files, &setup, &items);
+    let body = policy_value(retry.as_ref(), &files, &setup, &items);
     Ok(ResolvedPolicy {
         absent: false,
+        retry,
         path: Some(path.to_string()),
         digest: Some(digest_of(&body)?),
         files,
@@ -230,6 +238,7 @@ fn walk(
     prefix: &str,
     stack: &[PathBuf],
     seen_files: &mut HashSet<String>,
+    retry: &mut Option<RetryPolicy>,
     setup: &mut Vec<Item>,
     items: &mut Vec<Item>,
     files: &mut Vec<PolicyFile>,
@@ -250,6 +259,12 @@ fn walk(
     let value = read_yaml_file(&absolute).map_err(|message| format!("{safe}: {message}"))?;
     check_policy(&value).map_err(|message| format!("{safe}: {message}"))?;
     let document: PublicDocument = serde_json::from_value(value).map_err(|err| format!("{safe}: {err}"))?;
+    if !prefix.is_empty() && document.retry.is_some() {
+        return Err("retry is only allowed on the entry policy".to_string());
+    }
+    if prefix.is_empty() {
+        *retry = document.retry;
+    }
     if !prefix.is_empty() && !document.setup.is_empty() {
         return Err("setup is only allowed on the entry policy".to_string());
     }
@@ -268,7 +283,7 @@ fn walk(
         } else {
             format!("{prefix}/{}", entry.name)
         };
-        walk(root, &entry.path, &child_prefix, &child_stack, seen_files, setup, items, files, ids)?;
+        walk(root, &entry.path, &child_prefix, &child_stack, seen_files, retry, setup, items, files, ids)?;
     }
     if prefix.is_empty() {
         for step in &document.setup {
@@ -529,6 +544,31 @@ mod tests {
             }
             LoadResult::Failed { message, .. } => panic!("{message}"),
         }
+    }
+
+    #[test]
+    fn retry_requires_an_explicit_entry_limit_and_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join(".agents/closeout")).unwrap();
+        let path = root.join(PUBLIC_POLICY_PATH);
+        for retry in [json!({}), json!({"scope": "task"}), json!({"maxFailedAttemptsPerItem": 1}), json!({"maxFailedAttemptsPerItem": 0, "scope": "task"}), json!({"maxFailedAttemptsPerItem": 1, "scope": "session"})] {
+            fs::write(&path, json!({"specVersion": "0.1", "retry": retry}).to_string()).unwrap();
+            assert!(matches!(load_policy(root), LoadResult::Failed { .. }));
+        }
+        let mut document = json!({"specVersion": "0.1", "retry": {"maxFailedAttemptsPerItem": 2, "scope": "task"}});
+        fs::write(&path, document.to_string()).unwrap();
+        let LoadResult::Ready(before) = load_policy(root) else { panic!("retry should load"); };
+        document["retry"]["maxFailedAttemptsPerItem"] = json!(3);
+        fs::write(&path, document.to_string()).unwrap();
+        let LoadResult::Ready(after) = load_policy(root) else { panic!("retry should load"); };
+        assert_ne!(before.digest, after.digest);
+        let canonical: Value = serde_json::from_str(&canonical_policy_body(&after).unwrap()).unwrap();
+        assert_eq!(canonical["retry"], document["retry"]);
+        fs::write(root.join(".agents/closeout/child.yaml"), document.to_string()).unwrap();
+        fs::write(&path, "specVersion: \"0.1\"\nimports:\n  - path: .agents/closeout/child.yaml\n    as: child\n").unwrap();
+        let LoadResult::Failed { message, .. } = load_policy(root) else { panic!("imported retry should fail"); };
+        assert_eq!(message, "retry is only allowed on the entry policy");
     }
 
     #[test]

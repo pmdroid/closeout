@@ -17,6 +17,7 @@
       "additionalProperties": false,
       "required": ["session", "model", "provider"],
       "properties": {
+        "task": { "type": "string", "minLength": 1, "maxLength": 256 },
         "session": { "type": "string", "maxLength": 256 },
         "model": { "type": "string", "maxLength": 256 },
         "provider": { "type": "string", "maxLength": 256 }
@@ -42,7 +43,7 @@
           "id": { "type": "string" },
           "kind": { "type": "string" },
           "state": {
-            "enum": ["passed", "failed", "missing", "stale", "unsupported", "independence", "untrusted", "invalid", "skipped"]
+            "enum": ["passed", "failed", "missing", "stale", "unsupported", "independence", "untrusted", "invalid", "skipped", "exhausted"]
           },
           "message": { "type": "string" },
           "attempt": { "type": "integer", "minimum": 1 }

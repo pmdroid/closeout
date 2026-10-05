@@ -15,6 +15,8 @@ Command requirements are executed by the Closeout runner in one detached worktre
 
 A message that tests passed is not command evidence. The evidence file written by the runner is the record.
 
+When the policy has `retry.scope: task`, use the same `--task <id>` on `run`, `decision`, `try`, and `evidence add` throughout the task. Set `CLOSEOUT_TASK` to that ID for the agent hooks. Preserve the evidence directory across commits and sessions. A requirement at its configured failed-attempt limit is `exhausted`. Stop retrying and ask the operator for help. An exhausted decision stays blocked; a stop hook lets the agent stop without accepting the task. Only the operator or orchestrator authorizes a new task ID after escalation.
+
 For a review requirement, follow the skill named on that item. Use a different session when `differentSession` is true, and a different model when `differentModel` is true. An empty model id does not prove independence. Do not edit the candidate during the review.
 
 Write findings to a JSON array. Each object has `severity`, `location`, `explanation`, and `evidence`. Then record them:

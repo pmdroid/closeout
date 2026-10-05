@@ -1,7 +1,7 @@
 use crate::paths::any_path_matches;
 use crate::types::{
     Candidate, CommandRecord, Decision, DecisionName, EvidenceRecord, ExecInfo, Gate, Item, ItemBody, ItemResult, ItemState,
-    PolicyInfo, ResolvedPolicy, ReviewRecord, Severity, SPEC_VERSION, PRODUCER_NAME, VERSION,
+    PolicyInfo, ResolvedPolicy, RetryScope, ReviewRecord, Severity, SPEC_VERSION, PRODUCER_NAME, VERSION,
 };
 use std::collections::HashSet;
 
@@ -33,7 +33,7 @@ pub fn evaluate(input: EvaluateInput<'_>) -> Decision {
         items: Vec::new(),
         warnings: input.policy.warnings.clone(),
     };
-    if let Some(message) = input.evidence_error {
+    if let Some(message) = input.evidence_error.clone().or_else(|| retry_task_error(input.policy, input.candidate)) {
         return Decision {
             decision: DecisionName::Blocked,
             message: Some(message),
@@ -55,7 +55,7 @@ pub fn evaluate(input: EvaluateInput<'_>) -> Decision {
             result.state = ItemState::Skipped;
             result.message = "setup failed".to_string();
         }
-        if result.state == ItemState::Failed {
+        if matches!(result.state, ItemState::Failed | ItemState::Exhausted) {
             setup_failed = true;
         }
         items.push(result);
@@ -127,11 +127,15 @@ fn judge(item: &Item, input: &EvaluateInput<'_>) -> ItemResult {
             attempt: None,
         };
     }
+    if let Some(result) = retry_block(input.policy, item, input.base, input.head, input.candidate, input.records) {
+        return result;
+    }
     let digest = input.policy.digest.as_deref().unwrap_or("");
     let matching: Vec<&EvidenceRecord> = input
         .records
         .iter()
         .filter(|record| record.item_id() == item.id && record.base() == input.base && record.head() == input.head && record.policy_digest() == digest)
+        .filter(|record| input.policy.retry.as_ref().is_none_or(|retry| retry.scope != RetryScope::Task || record.task() == input.candidate.task))
         .collect();
     if matching.is_empty() {
         let any = input.records.iter().any(|record| record.item_id() == item.id);
@@ -173,6 +177,60 @@ fn judge(item: &Item, input: &EvaluateInput<'_>) -> ItemResult {
         },
         ItemBody::Unsupported { .. } => unreachable!(),
     }
+}
+
+pub fn retry_task_error(policy: &ResolvedPolicy, candidate: &Candidate) -> Option<String> {
+    if policy.retry.as_ref().is_some_and(|retry| retry.scope == RetryScope::Task) && candidate.task.trim().is_empty() {
+        return Some("task retry scope requires --task with a stable task ID".to_string());
+    }
+    if !candidate.task.is_empty() && (candidate.task.trim().is_empty() || candidate.task.len() > 256) {
+        return Some("task ID must contain 1 to 256 bytes and cannot be blank".to_string());
+    }
+    None
+}
+
+pub fn retry_block(
+    policy: &ResolvedPolicy,
+    item: &Item,
+    base: &str,
+    head: &str,
+    candidate: &Candidate,
+    records: &[EvidenceRecord],
+) -> Option<ItemResult> {
+    let retry = policy.retry.as_ref()?;
+    let digest = policy.digest.as_deref().unwrap_or("");
+    let mut seen = HashSet::new();
+    let mut failed = 0;
+    for record in records.iter().filter(|record| {
+        record.item_id() == item.id && record.policy_digest() == digest && match retry.scope {
+            RetryScope::Task => !candidate.task.is_empty() && record.task() == candidate.task,
+            RetryScope::Candidate => record.base() == base && record.head() == head,
+        }
+    }) {
+        if !seen.insert((record.base(), record.head(), record.attempt())) {
+            return Some(ItemResult {
+                id: item.id.clone(), kind: item.kind_name().to_string(), state: ItemState::Invalid,
+                message: "duplicate evidence attempt".to_string(), attempt: None,
+            });
+        }
+        let counts = match (&item.body, record) {
+            (ItemBody::Command { exec, .. }, EvidenceRecord::Command(record)) => judge_command(item, exec, record, false).state == ItemState::Failed,
+            (ItemBody::Setup { exec, .. }, EvidenceRecord::Command(record)) => judge_command(item, exec, record, true).state == ItemState::Failed,
+            (ItemBody::Review { independence, fail_on, .. }, EvidenceRecord::Review(record)) => judge_review(item, independence, *fail_on, record, candidate).state == ItemState::Failed,
+            _ => false,
+        };
+        failed += u64::from(counts);
+    }
+    if failed < retry.max_failed_attempts_per_item {
+        return None;
+    }
+    Some(ItemResult {
+        id: item.id.clone(),
+        kind: item.kind_name().to_string(),
+        state: ItemState::Exhausted,
+        message: format!("{failed} of {} allowed failed attempts used. Stop retrying and ask for help.", retry.max_failed_attempts_per_item),
+        attempt: None,
+    })
 }
 
 fn kind_mismatch(item: &Item, attempt: u64) -> ItemResult {
@@ -293,6 +351,7 @@ mod tests {
     fn policy(items: Vec<Item>) -> ResolvedPolicy {
         ResolvedPolicy {
             absent: false,
+            retry: None,
             path: Some(".agents/closeout.yaml".to_string()),
             digest: Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
             files: Vec::new(),
@@ -304,6 +363,7 @@ mod tests {
 
     fn candidate() -> Candidate {
         Candidate {
+            task: String::new(),
             session: "implementer".to_string(),
             model: "model-a".to_string(),
             provider: "codex".to_string(),
@@ -312,6 +372,7 @@ mod tests {
 
     fn command_record(argv: &[&str], exit_code: Option<i32>, timed_out: bool, dirty: bool, head_moved: bool) -> EvidenceRecord {
         EvidenceRecord::Command(CommandRecord {
+            task: String::new(),
             spec_version: SPEC_VERSION.to_string(),
             item_id: "check".to_string(),
             base: "b".to_string(),
@@ -335,6 +396,7 @@ mod tests {
 
     fn review_record(session: &str, model: &str, findings: Vec<Finding>) -> EvidenceRecord {
         EvidenceRecord::Review(ReviewRecord {
+            task: String::new(),
             spec_version: SPEC_VERSION.to_string(),
             item_id: "adversarial-review".to_string(),
             base: "b".to_string(),
@@ -381,6 +443,35 @@ mod tests {
             changed_paths: changed,
             evidence_error: None,
         })
+    }
+
+    #[test]
+    fn retry_counts_only_failed_evidence_in_the_selected_scope() {
+        let mut loaded = policy(vec![Item::command("check", vec!["true".to_string()], 30)]);
+        loaded.retry = Some(crate::types::RetryPolicy { max_failed_attempts_per_item: 1, scope: RetryScope::Candidate });
+        let mut untrusted = command_record(&["true"], Some(1), false, false, false);
+        if let EvidenceRecord::Command(record) = &mut untrusted {
+            record.producer.name = "unknown".to_string();
+        }
+        assert_eq!(decide(&loaded, &[untrusted]).items[0].state, ItemState::Untrusted);
+        let passed = command_record(&["true"], Some(0), false, false, false);
+        assert_eq!(decide(&loaded, &[passed]).decision, DecisionName::Accepted);
+        let mut failed = command_record(&["true"], Some(1), false, false, false);
+        assert_eq!(decide(&loaded, &[failed.clone(), failed.clone()]).items[0].state, ItemState::Invalid);
+        assert_eq!(decide(&loaded, &[failed.clone()]).items[0].state, ItemState::Exhausted);
+        if let EvidenceRecord::Command(record) = &mut failed {
+            record.head = "earlier".to_string();
+        }
+        assert_eq!(decide(&loaded, &[failed.clone()]).items[0].state, ItemState::Stale);
+        loaded.retry.as_mut().unwrap().scope = RetryScope::Task;
+        let mut candidate = candidate();
+        candidate.task = "task-one".to_string();
+        if let EvidenceRecord::Command(record) = &mut failed {
+            record.task = candidate.task.clone();
+        }
+        assert!(retry_block(&loaded, &loaded.items[0], "new-base", "new-head", &candidate, &[failed.clone()]).is_some());
+        candidate.task = "task-two".to_string();
+        assert!(retry_block(&loaded, &loaded.items[0], "new-base", "new-head", &candidate, &[failed]).is_none());
     }
 
     #[test]
@@ -456,6 +547,7 @@ mod tests {
     fn absent_policy_is_accepted() {
         let loaded = ResolvedPolicy {
             absent: true,
+            retry: None,
             path: None,
             digest: None,
             files: Vec::new(),
@@ -521,6 +613,14 @@ mod tests {
         assert_eq!(decision.items[0].state, ItemState::Failed);
         assert_eq!(decision.items[0].kind, "setup");
         assert_eq!(decision.items[1].state, ItemState::Skipped);
+        loaded.retry = Some(crate::types::RetryPolicy { max_failed_attempts_per_item: 1, scope: RetryScope::Candidate });
+        let mut failed = command_record(&["false"], Some(1), false, false, false);
+        if let EvidenceRecord::Command(record) = &mut failed {
+            record.item_id = "install".to_string();
+        }
+        let exhausted = decide(&loaded, &[failed]);
+        assert_eq!(exhausted.items[0].state, ItemState::Exhausted);
+        assert_eq!(exhausted.items[1].state, ItemState::Skipped);
         assert_eq!(decision.items[1].message, "setup failed");
 
         let mut dirty = command_record(&["false"], Some(0), false, true, false);

@@ -12,8 +12,8 @@ mod types;
 mod yaml_doc;
 
 pub use canonical::{canonical_json, digest_of, sha256_hex};
-pub use evaluate::{blocked_policy, evaluate, EvaluateInput};
-pub use evidence::{next_attempt, read_evidence, write_decision_file, write_log, write_record};
+pub use evaluate::{blocked_policy, evaluate, retry_block, retry_task_error, EvaluateInput};
+pub use evidence::{lock_retry_budget, next_attempt, read_evidence, write_decision_file, write_log, write_record};
 pub use format::{decision_from_markdown, exit_status, format_decision, format_markdown};
 pub use seal::{generate_pgp_keys, open_report, seal_report};
 pub use git::resolve_commit;

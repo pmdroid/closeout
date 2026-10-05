@@ -35,9 +35,11 @@ async function nudge(directory, client, event) {
   const counts = readCounts(path);
   if ((counts[head] || 0) >= 3) return;
   const bin = process.env.CLOSEOUT_BIN || "closeout";
+  const args = ["decision", "--gate", "beforePR", "--base", base, "--head", head, "--root", root, "--json"];
+  if (process.env.CLOSEOUT_TASK) args.push("--task", process.env.CLOSEOUT_TASK);
   const result = spawnSync(
     bin,
-    ["decision", "--gate", "beforePR", "--base", base, "--head", head, "--root", root, "--json"],
+    args,
     { encoding: "utf8", cwd: root },
   );
   let decision = null;
@@ -49,7 +51,7 @@ async function nudge(directory, client, event) {
   if (!decision || decision.decision === "accepted") return;
   const sessionID = event.properties && event.properties.sessionID;
   if (!sessionID || !client || !client.session || typeof client.session.prompt !== "function") return;
-  counts[head] = (counts[head] || 0) + 1;
+  counts[head] = (decision.items || []).some((item) => item.state === "exhausted") ? 3 : (counts[head] || 0) + 1;
   writeCounts(path, counts);
   await client.session.prompt({
     path: { id: sessionID },
