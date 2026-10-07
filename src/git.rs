@@ -1,6 +1,6 @@
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -174,14 +174,87 @@ pub fn origin_main(cwd: &Path) -> Result<String, String> {
 }
 
 pub fn list_blobs(cwd: &Path, commit: &str, prefix: &str) -> Result<Vec<ListedBlob>, String> {
-    let raw = capture_raw(
-        "git",
-        &owned(&["-c", "core.quotepath=false", "ls-tree", "-r", "-z", commit, "--", prefix]),
-        cwd,
-        Duration::from_secs(30),
-        None,
-        &[("GIT_TERMINAL_PROMPT", "0")],
-    );
+    ls_tree(cwd, &["-r", commit, "--", prefix])
+}
+
+pub enum Located {
+    Commit(ListedBlob),
+    Disk(PathBuf),
+    Missing,
+}
+
+pub fn locate(cwd: &Path, commit: &str, path: &str) -> Result<Located, String> {
+    let mut pending: Vec<String> = path.rsplit('/').map(str::to_string).collect();
+    let mut real: Vec<String> = Vec::new();
+    let mut found = None;
+    let mut hops = 0;
+    while let Some(part) = pending.pop() {
+        match part.as_str() {
+            "" | "." => continue,
+            ".." => {
+                found = None;
+                if real.pop().is_none() {
+                    return Ok(Located::Disk(beyond(cwd.join(".."), pending)));
+                }
+                continue;
+            }
+            _ => real.push(part),
+        }
+        let Some(entry) = tree_entry(cwd, commit, &real.join("/"))? else {
+            return Ok(Located::Missing);
+        };
+        if entry.mode != "120000" {
+            if entry.mode != "040000" && !pending.is_empty() {
+                return Ok(Located::Missing);
+            }
+            found = Some(entry);
+            continue;
+        }
+        hops += 1;
+        if hops > 40 {
+            return Err(format!("symlink loop: {path}"));
+        }
+        real.pop();
+        found = None;
+        let target = String::from_utf8(read_blob(cwd, &entry.object)?).map_err(|_| "could not read the policy file".to_string())?;
+        if target.is_empty() {
+            return Ok(Located::Missing);
+        }
+        if target.starts_with('/') {
+            return Ok(Located::Disk(beyond(PathBuf::from(target), pending)));
+        }
+        pending.extend(target.rsplit('/').map(str::to_string));
+    }
+    if let Some(entry) = found {
+        return Ok(Located::Commit(entry));
+    }
+    if real.is_empty() {
+        return Ok(Located::Commit(ListedBlob {
+            mode: "040000".to_string(),
+            object: String::new(),
+            path: ".".to_string(),
+        }));
+    }
+    Ok(tree_entry(cwd, commit, &real.join("/"))?.map_or(Located::Missing, Located::Commit))
+}
+
+pub fn child(dir: &str, name: &str) -> String {
+    if dir == "." { name.to_string() } else { format!("{dir}/{name}") }
+}
+
+fn beyond(mut base: PathBuf, pending: Vec<String>) -> PathBuf {
+    base.extend(pending.into_iter().rev());
+    base
+}
+
+pub fn tree_entry(cwd: &Path, commit: &str, path: &str) -> Result<Option<ListedBlob>, String> {
+    Ok(ls_tree(cwd, &[commit, "--", path])?.into_iter().find(|entry| entry.path == path))
+}
+
+fn ls_tree(cwd: &Path, args: &[&str]) -> Result<Vec<ListedBlob>, String> {
+    let mut full = vec!["--literal-pathspecs", "-c", "core.quotepath=false", "ls-tree", "-z"];
+    full.extend_from_slice(args);
+    let raw = capture_raw("git", &owned(&full), cwd, Duration::from_secs(30), None, &[("GIT_TERMINAL_PROMPT", "0")]);
     if raw.spawn_failed || raw.timed_out || raw.code != Some(0) || raw.truncated {
         return Err("could not read the policy file".to_string());
     }
@@ -280,7 +353,7 @@ fn parse_ls_tree(bytes: &[u8]) -> Result<Vec<ListedBlob>, String> {
         let mode = parts.next().unwrap_or("");
         let kind = parts.next().unwrap_or("");
         let object = parts.next().unwrap_or("");
-        if kind != "blob" || !is_sha(object) || path.is_empty() {
+        if !matches!(kind, "blob" | "tree" | "commit") || !is_sha(object) || path.is_empty() {
             return Err("could not read the policy file".to_string());
         }
         out.push(ListedBlob {

@@ -6,7 +6,7 @@ use closeout::{
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -474,6 +474,335 @@ items:
     assert!(text.contains("remote-check  passed"), "{text}");
     assert!(text.contains("look"), "{text}");
     assert!(!text.contains("local-check"), "{text}");
+}
+
+#[test]
+fn agent_symlinks_are_followed_wherever_they_point() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let shared = temp.path().join("shared");
+    fs::create_dir_all(&shared).unwrap();
+    fs::write(shared.join("notes.md"), "shared notes\n").unwrap();
+    fs::write(temp.path().join("outside.md"), "outside\n").unwrap();
+    for dir in [".claude/skills/look", ".agents/closeout", ".closeout-staging", "docs", "policies"] {
+        fs::create_dir_all(repo.join(dir)).unwrap();
+    }
+    fs::write(repo.join(".claude/skills/look/SKILL.md"), "look\n").unwrap();
+    fs::write(repo.join(".claude/skills/look/.closeout-staging"), "committed\n").unwrap();
+    fs::write(
+        repo.join(".closeout-staging/check.yaml"),
+        "specVersion: \"0.1\"\nitems:\n  - id: check\n    kind: command\n    gate: beforePR\n    exec: [\"/usr/bin/true\"]\n    timeoutSeconds: 30\n",
+    )
+    .unwrap();
+    fs::write(repo.join("docs/rubric.md"), "rubric\n").unwrap();
+    fs::write(
+        repo.join("policies/tests.yaml"),
+        "specVersion: \"0.1\"\nitems:\n  - id: tests\n    kind: command\n    gate: beforePR\n    exec: [\"/usr/bin/true\"]\n    timeoutSeconds: 30\n",
+    )
+    .unwrap();
+    symlink("../.claude/skills", repo.join(".agents/skills")).unwrap();
+    symlink("../../../docs/rubric.md", repo.join(".claude/skills/look/rubric.md")).unwrap();
+    symlink("../../../../outside.md", repo.join(".claude/skills/look/outside.md")).unwrap();
+    symlink(&shared, repo.join(".claude/skills/look/shared")).unwrap();
+    symlink("../../policies/tests.yaml", repo.join(".agents/closeout/tests.yaml")).unwrap();
+    fs::write(
+        repo.join(".agents/closeout.yaml"),
+        r#"specVersion: "0.1"
+imports:
+  - path: .agents/closeout/tests.yaml
+    as: linked
+  - path: .closeout-staging/check.yaml
+    as: named
+items:
+  - id: look
+    kind: review
+    gate: beforePR
+    skill: .agents/skills/look/SKILL.md
+    independence:
+      differentSession: false
+      differentModel: false
+    failOn: P1
+"#,
+    )
+    .unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+
+    let local = match load_policy(&repo) {
+        LoadResult::Ready(policy) => policy,
+        LoadResult::Failed { message, .. } => panic!("{message}"),
+    };
+    let paths: Vec<_> = local.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            ".agents/closeout.yaml",
+            ".agents/closeout/tests.yaml",
+            ".agents/skills/look/.closeout-staging",
+            ".agents/skills/look/SKILL.md",
+            ".agents/skills/look/outside.md",
+            ".agents/skills/look/rubric.md",
+            ".agents/skills/look/shared/notes.md",
+            ".closeout-staging/check.yaml",
+        ]
+    );
+
+    let remote = closeout(&repo, &["validate", "--json"]);
+    assert_eq!(remote.status.code(), Some(0), "{}{}", String::from_utf8_lossy(&remote.stdout), String::from_utf8_lossy(&remote.stderr));
+    let report: Value = serde_json::from_slice(&remote.stdout).unwrap();
+    assert_eq!(report["digest"], local.digest.unwrap());
+    assert_eq!(report["items"], serde_json::json!(["linked/tests", "named/check", "look"]));
+
+    fs::write(shared.join("notes.md"), "changed notes\n").unwrap();
+    let moved: Value = serde_json::from_slice(&closeout(&repo, &["validate", "--json"]).stdout).unwrap();
+    assert_ne!(moved["digest"], report["digest"]);
+
+    symlink(".", repo.join(".claude/skills/look/again")).unwrap();
+    match load_policy(&repo) {
+        LoadResult::Failed { message, .. } => assert!(message.contains("symlink loop"), "{message}"),
+        LoadResult::Ready(_) => panic!("a symlink loop should fail"),
+    }
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "loop"]);
+    git(&repo, &["push", "origin", "main"]);
+    let looped = closeout(&repo, &["validate"]);
+    assert_eq!(looped.status.code(), Some(3));
+    let looped_text = format!("{}{}", String::from_utf8_lossy(&looped.stdout), String::from_utf8_lossy(&looped.stderr));
+    assert!(looped_text.contains("symlink loop"), "{looped_text}");
+}
+
+#[test]
+fn symlink_targets_resolve_the_way_the_filesystem_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    let shared = temp.path().join("shared");
+    for dir in [repo.join(".agents/closeout"), repo.join(".agents/skills/look"), repo.join("docs"), home.join(".agents"), shared.clone()] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(shared.join("notes.md"), "notes\n").unwrap();
+    fs::create_dir_all(shared.join("closeout-policy-notes")).unwrap();
+    fs::write(shared.join("closeout-policy-notes/kept.md"), "kept\n").unwrap();
+    fs::write(repo.join("docs/readme.md"), "docs\n").unwrap();
+    symlink(&shared, repo.join(".agents/skills/look/shared")).unwrap();
+    symlink("docs", repo.join(".acpdash")).unwrap();
+    let command = |id: &str| {
+        format!("specVersion: \"0.1\"\nitems:\n  - id: {id}\n    kind: command\n    gate: beforePR\n    exec: [\"/usr/bin/true\"]\n    timeoutSeconds: 30\n")
+    };
+    fs::write(home.join(".agents/closeout.yaml"), command("global-check")).unwrap();
+    fs::write(temp.path().join("absolute.yaml"), command("absolute")).unwrap();
+    fs::write(repo.join(":colon.yaml"), command("colon")).unwrap();
+    fs::write(repo.join("plain.txt"), "plain\n").unwrap();
+    fs::write(repo.join("through.yaml"), command("through")).unwrap();
+    fs::write(repo.join(".agents/skills/look/SKILL.md"), "look\n").unwrap();
+    assert!(Command::new("mkfifo").arg(temp.path().join("pipe")).status().unwrap().success());
+    symlink(temp.path().join("absolute.yaml"), repo.join(".agents/closeout/absolute.yaml")).unwrap();
+    symlink("../../:colon.yaml", repo.join(".agents/closeout/colon.yaml")).unwrap();
+    symlink(temp.path().join("pipe"), repo.join(".agents/skills/look/pipe")).unwrap();
+    fs::write(
+        repo.join(".agents/closeout.yaml"),
+        r#"specVersion: "0.1"
+imports:
+  - path: .agents/closeout/absolute.yaml
+    as: absolute
+  - path: .agents/closeout/colon.yaml
+    as: colon
+items:
+  - id: look
+    kind: review
+    gate: beforePR
+    skill: .agents/skills/look/SKILL.md
+    independence:
+      differentSession: false
+      differentModel: false
+    failOn: P1
+"#,
+    )
+    .unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+    let publish = |message: &str| {
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", message]);
+        git(&repo, &["push", "origin", "main"]);
+    };
+    let validate = || validate_with(&repo, &[("HOME", &home)]);
+
+    let local = match load_policy(&repo) {
+        LoadResult::Ready(policy) => policy,
+        LoadResult::Failed { message, .. } => panic!("{message}"),
+    };
+    let (code, text) = validate();
+    assert_eq!(code, Some(0), "{text}");
+    let report: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(report["digest"], local.digest.unwrap());
+    assert_eq!(report["items"], serde_json::json!(["absolute/absolute", "colon/colon", "look"]));
+
+    let (code, text) = validate_with(&repo, &[("HOME", &home), ("TMPDIR", &shared)]);
+    assert_eq!(code, Some(3), "{text}");
+    assert!(text.contains("TMPDIR"), "{text}");
+
+    symlink("../../plain.txt/../through.yaml", repo.join(".agents/closeout/through.yaml")).unwrap();
+    let entry = fs::read_to_string(repo.join(".agents/closeout.yaml")).unwrap();
+    let importing = |path: &str| entry.replace("items:\n", &format!("  - path: {path}\n    as: extra\nitems:\n"));
+    fs::write(repo.join(".agents/closeout.yaml"), importing(".agents/closeout/through.yaml")).unwrap();
+    assert!(matches!(load_policy(&repo), LoadResult::Failed { .. }));
+    publish("through a file");
+    let (code, text) = validate();
+    assert_eq!(code, Some(3), "{text}");
+
+    fs::write(repo.join(".agents/closeout.yaml"), importing(".agents/closeout/empty/colon.yaml")).unwrap();
+    git(&repo, &["add", "-A"]);
+    let hashed = Command::new("git").args(["hash-object", "-w", "--stdin"]).current_dir(&repo).stdin(std::process::Stdio::null()).output().unwrap();
+    let empty = String::from_utf8(hashed.stdout).unwrap();
+    git(&repo, &["update-index", "--add", "--cacheinfo", &format!("120000,{},.agents/closeout/empty", empty.trim())]);
+    git(&repo, &["commit", "-m", "empty link"]);
+    git(&repo, &["push", "origin", "main"]);
+    let (code, text) = validate();
+    assert_eq!(code, Some(3), "{text}");
+
+    fs::remove_file(repo.join(".agents/closeout.yaml")).unwrap();
+    symlink("missing.yaml", repo.join(".agents/closeout.yaml")).unwrap();
+    assert!(matches!(load_policy(&repo), LoadResult::Failed { .. }));
+    publish("broken entry");
+    let (code, text) = validate();
+    assert_eq!(code, Some(3), "{text}");
+    assert!(text.contains("symlink is broken"), "{text}");
+    assert!(!text.contains("global-check"), "{text}");
+
+    fs::remove_file(repo.join(".agents/closeout.yaml")).unwrap();
+    publish("no entry");
+    let (code, text) = validate();
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("global-check"), "{text}");
+
+    let looped = temp.path().join("looped");
+    fs::create_dir_all(&looped).unwrap();
+    symlink(".agents", looped.join(".agents")).unwrap();
+    assert!(matches!(load_policy(&looped), LoadResult::Failed { .. }));
+}
+
+#[test]
+fn odd_parents_of_the_entry_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    fs::create_dir_all(repo.join(".agents")).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        repo.join(".agents/closeout.yaml"),
+        "specVersion: \"0.1\"\nitems:\n  - id: entry-check\n    kind: command\n    gate: beforePR\n    exec: [\"/usr/bin/true\"]\n    timeoutSeconds: 30\n",
+    )
+    .unwrap();
+    symlink(".", repo.join(".acpdash")).unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+    let validate = || validate_with(&repo, &[("HOME", &home)]);
+
+    let (code, text) = validate();
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("entry-check"), "{text}");
+
+    fs::remove_file(repo.join(".acpdash")).unwrap();
+    let head = resolve_commit(&repo, "HEAD").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["update-index", "--add", "--cacheinfo", &format!("160000,{head},.acpdash")]);
+    git(&repo, &["commit", "-m", "submodule"]);
+    git(&repo, &["push", "origin", "main"]);
+    let (code, text) = validate();
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("entry-check"), "{text}");
+
+    git(&repo, &["rm", "--cached", "-q", ".acpdash"]);
+    fs::create_dir_all(repo.join(".acpdash/closeout.yaml")).unwrap();
+    fs::write(repo.join(".acpdash/closeout.yaml/readme"), "a directory, not a policy\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", "directory leaf"]);
+    git(&repo, &["push", "origin", "main"]);
+    let (code, text) = validate();
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("entry-check"), "{text}");
+
+    let outside = temp.path().join("outside");
+    symlink(&outside, &outside).unwrap();
+    fs::remove_dir_all(repo.join(".agents")).unwrap();
+    symlink(&outside, repo.join(".agents")).unwrap();
+    git(&repo, &["add", "-A", ".agents"]);
+    git(&repo, &["commit", "-m", "looping parent"]);
+    git(&repo, &["push", "origin", "main"]);
+    assert!(matches!(load_policy(&repo), LoadResult::Failed { .. }));
+    let (code, text) = validate();
+    assert_eq!(code, Some(3), "{text}");
+
+    let external = temp.path().join("external");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(
+        external.join("closeout.yaml"),
+        "specVersion: \"0.1\"\nitems:\n  - id: external-check\n    kind: command\n    gate: beforePR\n    exec: [\"/usr/bin/true\"]\n    timeoutSeconds: 30\n",
+    )
+    .unwrap();
+    fs::remove_file(repo.join(".agents")).unwrap();
+    symlink(&external, repo.join(".agents")).unwrap();
+    git(&repo, &["add", "-A", ".agents"]);
+    git(&repo, &["commit", "-m", "external parent"]);
+    git(&repo, &["push", "origin", "main"]);
+    let (code, text) = validate();
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("external-check"), "{text}");
+
+    fs::rename(&external, temp.path().join("moved")).unwrap();
+    assert!(matches!(load_policy(&repo), LoadResult::Failed { .. }));
+    let (code, text) = validate();
+    assert_eq!(code, Some(3), "{text}");
+    assert!(text.contains("symlink is broken"), "{text}");
+}
+
+#[test]
+fn legacy_policy_with_a_skill_directory_stays_ignored() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join(".acpdash")).unwrap();
+    fs::create_dir_all(repo.join("acpdash-review")).unwrap();
+    fs::write(repo.join("acpdash-review/README.md"), "notes\n").unwrap();
+    fs::write(
+        repo.join(".acpdash/closeout.yaml"),
+        "version: 1\nitems:\n  - id: look\n    kind: review\n    skill: acpdash-review\n    failOn: P1\n",
+    )
+    .unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+    assert!(matches!(load_policy(&repo), LoadResult::Ready(policy) if policy.absent));
+    let (code, text) = validate_with(&repo, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    let report: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(report["absent"], true);
+    assert_eq!(report["items"], serde_json::json!([]));
+}
+
+#[test]
+fn names_that_are_not_utf8_behind_a_link_fail_on_both_sides() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let shared = temp.path().join("shared");
+    fs::create_dir_all(repo.join(".agents/skills/look")).unwrap();
+    fs::create_dir_all(&shared).unwrap();
+    fs::write(shared.join(OsStr::from_bytes(b"\xff.txt")), "one\n").unwrap();
+    fs::write(shared.join(OsStr::from_bytes(b"\xfe.txt")), "two\n").unwrap();
+    fs::write(shared.join("\u{FFFD}.txt"), "three\n").unwrap();
+    fs::write(repo.join(".agents/skills/look/SKILL.md"), "look\n").unwrap();
+    symlink(&shared, repo.join(".agents/skills/look/shared")).unwrap();
+    fs::write(
+        repo.join(".agents/closeout.yaml"),
+        "specVersion: \"0.1\"\nitems:\n  - id: look\n    kind: review\n    gate: beforePR\n    skill: .agents/skills/look/SKILL.md\n    independence:\n      differentSession: false\n      differentModel: false\n    failOn: P1\n",
+    )
+    .unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+    assert!(matches!(load_policy(&repo), LoadResult::Failed { .. }));
+    let (code, text) = validate_with(&repo, &[]);
+    assert_eq!(code, Some(3), "{text}");
 }
 
 #[test]
@@ -1123,6 +1452,17 @@ fn closeout(root: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_closeout"));
     command.args(args).arg("--root").arg(root);
     command.output().unwrap()
+}
+
+fn validate_with(root: &Path, env: &[(&str, &Path)]) -> (Option<i32>, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_closeout"));
+    command.args(["validate", "--json", "--root"]).arg(root);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    (output.status.code(), text)
 }
 
 fn all_logs(dir: &Path) -> Vec<String> {

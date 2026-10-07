@@ -1,4 +1,5 @@
 use crate::canonical::{digest_of, sha256_hex, utf16_cmp};
+use crate::git::Located;
 use crate::paths::{check_path_patterns, is_slug, repo_path, to_posix};
 use crate::schema::check_policy;
 use crate::types::{Item, ItemBody, LoadResult, PolicyFile, ResolvedPolicy, RetryPolicy, Warning, PUBLIC_POLICY_PATH, SPEC_VERSION};
@@ -7,9 +8,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const STAGING_PREFIX: &str = "closeout-policy-";
+const STAGING_MARKER: &str = ".closeout-staging";
 
 #[derive(Deserialize)]
 struct PublicDocument {
@@ -80,7 +85,7 @@ pub fn load_policy_from_origin(root: &Path) -> LoadResult {
         Ok(staged) => staged,
         Err(message) => return invalid(&message),
     };
-    match load_policy(&staged.path) {
+    match load_policy(&staged.tree) {
         LoadResult::Ready(policy) if policy.absent => load_global_policy(),
         other => other,
     }
@@ -117,7 +122,11 @@ pub fn load_policy(root: &Path) -> LoadResult {
         _ => return invalid("policy root is not a directory"),
     };
     let public_file = abs.join(PUBLIC_POLICY_PATH);
-    if fs::metadata(&public_file).is_err() {
+    let has_public = match entry_on_disk(&public_file) {
+        Ok(present) => present,
+        Err(message) => return invalid(&message),
+    };
+    if !has_public {
         return LoadResult::Ready(ResolvedPolicy {
             absent: true,
             retry: None,
@@ -358,10 +367,6 @@ fn skill_hashes(root: &Path, items: &[Item]) -> Result<Vec<PolicyFile>, String> 
         let Some(dir) = skill_file.parent() else {
             continue;
         };
-        let dir_meta = fs::symlink_metadata(dir).map_err(|_| format!("skill is missing: {skill_path}"))?;
-        if dir_meta.file_type().is_symlink() {
-            return Err(format!("skill file is a symlink: {}", dir.display()));
-        }
         for absolute in list_files(dir)? {
             let rel = rel_posix(root, &absolute);
             if !seen.insert(rel.clone()) {
@@ -374,19 +379,35 @@ fn skill_hashes(root: &Path, items: &[Item]) -> Result<Vec<PolicyFile>, String> 
 }
 
 fn list_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let temp = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
     let mut found = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let entries = fs::read_dir(&current).map_err(|_| "could not read the skill directory".to_string())?;
+    let mut stack = vec![(dir.to_path_buf(), Vec::new())];
+    while let Some((current, mut entered)) = stack.pop() {
+        let real = fs::canonicalize(&current).map_err(|_| "could not read the skill directory".to_string())?;
+        if entered.contains(&real) {
+            return Err(format!("symlink loop: {}", current.display()));
+        }
+        let entries = fs::read_dir(&current)
+            .and_then(|listing| listing.collect::<Result<Vec<_>, _>>())
+            .map_err(|_| "could not read the skill directory".to_string())?;
+        let staging = real.parent() == Some(temp.as_path())
+            && real.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(STAGING_PREFIX))
+            && entries.iter().any(|entry| entry.file_name() == STAGING_MARKER);
+        if staging {
+            return Err(format!(
+                "skill directory holds closeout staging output at {}; set TMPDIR outside skill directories",
+                current.display()
+            ));
+        }
+        entered.push(real);
         for entry in entries {
-            let entry = entry.map_err(|_| "could not read the skill directory".to_string())?;
             let absolute = entry.path();
-            let meta = fs::symlink_metadata(&absolute).map_err(|_| format!("skill file is a symlink: {}", absolute.display()))?;
-            if meta.file_type().is_symlink() {
-                return Err(format!("skill file is a symlink: {}", absolute.display()));
+            if entry.file_name().to_str().is_none() {
+                return Err(format!("skill file name is not UTF-8: {}", absolute.display()));
             }
+            let meta = fs::metadata(&absolute).map_err(|_| format!("symlink is broken: {}", absolute.display()))?;
             if meta.is_dir() {
-                stack.push(absolute);
+                stack.push((absolute, entered.clone()));
             } else if meta.is_file() {
                 found.push(absolute);
             }
@@ -421,6 +442,7 @@ fn rel_posix(root: &Path, absolute: &Path) -> String {
 
 struct Staged {
     path: PathBuf,
+    tree: PathBuf,
 }
 
 impl Drop for Staged {
@@ -433,30 +455,30 @@ fn stage_origin_policy(repo: &Path, commit: &str) -> Result<Staged, String> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("closeout-policy-{}-{n}-{nanos}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("{STAGING_PREFIX}{}-{n}-{nanos}", std::process::id()));
     fs::create_dir_all(&path).map_err(|_| "could not read the policy file".to_string())?;
-    let staged = Staged { path };
+    let staged = Staged { tree: path.join("tree"), path };
+    fs::write(staged.path.join(STAGING_MARKER), "").map_err(|_| "could not read the policy file".to_string())?;
+    fs::create_dir(&staged.tree).map_err(|_| "could not read the policy file".to_string())?;
     let mut pending = vec![PUBLIC_POLICY_PATH.to_string()];
     let mut seen = HashSet::new();
     while let Some(relative) = pending.pop() {
         if !seen.insert(relative.clone()) {
             continue;
         }
-        if repo_path(&staged.path, &relative).is_none() {
+        if repo_path(&staged.tree, &relative).is_none() {
             continue;
         }
-        let blobs = crate::git::list_blobs(repo, commit, &relative)?;
-        let Some(blob) = blobs.iter().find(|blob| blob.path == relative) else {
+        let Some(bytes) = read_located(repo, commit, &relative)? else {
+            if relative == PUBLIC_POLICY_PATH && broken(repo, commit, &relative)? {
+                return Err(format!("symlink is broken: {relative}"));
+            }
             continue;
         };
-        if !regular_mode(&blob.mode) {
-            return Err(format!("policy path is not a file: {relative}"));
-        }
-        let bytes = crate::git::read_blob(repo, &blob.object)?;
-        write_rel(&staged.path, &relative, &bytes)?;
+        write_rel(&staged.tree, &relative, &bytes)?;
         if relative.ends_with("/SKILL.md") {
             if let Some(dir) = relative.rsplit_once('/').map(|(dir, _)| dir) {
-                copy_tree(repo, commit, &staged.path, dir)?;
+                copy_tree(repo, commit, &staged.tree, dir, dir, &[])?;
             }
         }
         if !relative.ends_with("/SKILL.md") {
@@ -470,18 +492,111 @@ fn stage_origin_policy(repo: &Path, commit: &str) -> Result<Staged, String> {
     Ok(staged)
 }
 
-fn copy_tree(repo: &Path, commit: &str, dest: &Path, dir: &str) -> Result<(), String> {
-    for blob in crate::git::list_blobs(repo, commit, dir)? {
-        if blob.mode == "120000" {
-            return Err(format!("skill file is a symlink: {}", blob.path));
+fn read_located(repo: &Path, commit: &str, relative: &str) -> Result<Option<Vec<u8>>, String> {
+    match crate::git::locate(repo, commit, relative)? {
+        Located::Missing => Ok(None),
+        Located::Commit(entry) if regular_mode(&entry.mode) => crate::git::read_blob(repo, &entry.object).map(Some),
+        Located::Commit(entry) if entry.mode == "040000" => Ok(None),
+        Located::Commit(_) => Err(format!("policy path is not a file: {relative}")),
+        Located::Disk(path) => match fs::metadata(&path) {
+            Err(err) if nothing_there(&err) => Ok(None),
+            Err(_) => Err(format!("could not read the policy file: {}", path.display())),
+            Ok(meta) if meta.is_file() => read_disk(&path).map(Some),
+            Ok(meta) if meta.is_dir() => Ok(None),
+            Ok(_) => Err(format!("policy path is not a file: {relative}")),
+        },
+    }
+}
+
+fn broken(repo: &Path, commit: &str, relative: &str) -> Result<bool, String> {
+    let Some((dir, name)) = relative.rsplit_once('/') else {
+        return Ok(false);
+    };
+    match crate::git::locate(repo, commit, dir)? {
+        Located::Commit(entry) => {
+            let leaf = crate::git::tree_entry(repo, commit, &crate::git::child(&entry.path, name))?;
+            Ok(leaf.is_some_and(|leaf| leaf.mode != "040000"))
         }
-        if !regular_mode(&blob.mode) {
+        Located::Disk(path) if fs::metadata(&path).is_err() => Ok(true),
+        Located::Disk(path) => match fs::symlink_metadata(path.join(name)) {
+            Ok(meta) => Ok(!meta.is_dir()),
+            Err(err) if nothing_there(&err) => Ok(false),
+            Err(_) => Err(format!("could not read the policy file: {}", path.join(name).display())),
+        },
+        Located::Missing => Ok(crate::git::tree_entry(repo, commit, dir)?.is_some()),
+    }
+}
+
+fn entry_on_disk(path: &Path) -> Result<bool, String> {
+    if let Some(parent) = path.parent() {
+        if fs::symlink_metadata(parent).is_ok() && fs::metadata(parent).is_err() {
+            return Err(format!("symlink is broken: {}", parent.display()));
+        }
+    }
+    on_disk(path)
+}
+
+fn on_disk(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if nothing_there(&err) => Ok(false),
+        Err(_) => Err(format!("could not read the policy file: {}", path.display())),
+    }
+}
+
+fn nothing_there(err: &std::io::Error) -> bool {
+    matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
+}
+
+fn copy_tree(repo: &Path, commit: &str, dest: &Path, source: &str, target: &str, entered: &[String]) -> Result<(), String> {
+    let entry = match crate::git::locate(repo, commit, source)? {
+        Located::Commit(entry) => entry,
+        Located::Disk(path) => return copy_disk(&path, dest, target),
+        Located::Missing => return Err(format!("symlink is broken: {target}")),
+    };
+    if regular_mode(&entry.mode) {
+        return write_rel(dest, target, &crate::git::read_blob(repo, &entry.object)?);
+    }
+    if entry.mode != "040000" {
+        return Err(format!("skill path is not a file: {}", entry.path));
+    }
+    if entered.iter().any(|path| path == &entry.path) {
+        return Err(format!("symlink loop: {target}"));
+    }
+    let mut chain = entered.to_vec();
+    chain.push(entry.path.clone());
+    let prefix = crate::git::child(&entry.path, "");
+    for blob in crate::git::list_blobs(repo, commit, &entry.path)? {
+        let rest = blob.path.strip_prefix(&prefix).ok_or_else(|| "could not read the policy file".to_string())?;
+        let into = format!("{target}/{rest}");
+        if blob.mode == "120000" {
+            copy_tree(repo, commit, dest, &blob.path, &into, &chain)?;
+        } else if regular_mode(&blob.mode) {
+            write_rel(dest, &into, &crate::git::read_blob(repo, &blob.object)?)?;
+        } else {
             return Err(format!("skill path is not a file: {}", blob.path));
         }
-        let bytes = crate::git::read_blob(repo, &blob.object)?;
-        write_rel(dest, &blob.path, &bytes)?;
     }
     Ok(())
+}
+
+fn copy_disk(from: &Path, dest: &Path, target: &str) -> Result<(), String> {
+    let meta = fs::metadata(from).map_err(|_| format!("symlink is broken: {target}"))?;
+    if meta.is_file() {
+        return write_rel(dest, target, &read_disk(from)?);
+    }
+    if !meta.is_dir() {
+        return Ok(());
+    }
+    for file in list_files(from)? {
+        let rest = file.strip_prefix(from).ok().and_then(Path::to_str).ok_or_else(|| format!("skill file name is not UTF-8: {}", file.display()))?;
+        write_rel(dest, &format!("{target}/{rest}"), &read_disk(&file)?)?;
+    }
+    Ok(())
+}
+
+fn read_disk(path: &Path) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|_| "could not read the policy file".to_string())
 }
 
 fn enqueue_paths(value: &Value, pending: &mut Vec<String>) {
