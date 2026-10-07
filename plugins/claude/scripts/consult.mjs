@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const raw = readFileSync(0, "utf8");
 let input = {};
@@ -38,7 +39,46 @@ function gitRev(rev) {
   return result.stdout.trim();
 }
 
+function noCandidate() {
+  const quiet = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_TRACE")));
+  const result = spawnSync("git", ["-C", root, "log", "-1", "--format=%H"], {
+    encoding: "utf8",
+    env: { ...quiet, LC_ALL: "C", GIT_TRACE2: "0", GIT_TRACE2_EVENT: "0", GIT_TRACE2_PERF: "0" },
+  });
+  if (result.error || result.status === 0 || root.includes("\uFFFD") || Buffer.from(root).toString() !== root) return false;
+  const outside = /^fatal: not a git repository \(or any (of the parent directories|parent up to mount point )/;
+  return outside.test(result.stderr || "") && !repositoryAbove(root);
+}
+
+function realpath(path) {
+  try {
+    const bytes = realpathSync.native(path, { encoding: "buffer" });
+    const text = bytes.toString();
+    return Buffer.from(text).equals(bytes) ? text : "";
+  } catch {
+    return "";
+  }
+}
+
+function present(path) {
+  try {
+    return lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return true;
+  }
+}
+
+function repositoryAbove(dir) {
+  let at = realpath(dir);
+  if (!at) return true;
+  for (; ; at = dirname(at)) {
+    if ([".git", "HEAD", "objects", "refs"].some((name) => present(join(at, name)))) return true;
+    if (dirname(at) === at) return false;
+  }
+}
+
 const head = gitRev("HEAD");
+if (!head && !("CLOSEOUT_BASE" in process.env) && !("GIT_DIR" in process.env) && noCandidate()) process.exit(0);
 const base = process.env.CLOSEOUT_BASE ? gitRev(process.env.CLOSEOUT_BASE) : head;
 if (!head || !base) {
   finish("base or head does not resolve to a commit");

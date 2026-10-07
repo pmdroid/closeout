@@ -2,6 +2,7 @@ use closeout::{load_policy, ItemBody, LoadResult};
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -156,6 +157,228 @@ fn hook_stays_quiet_without_a_policy_or_when_silenced() {
     assert!(sentinel.exists());
     let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(parsed["decision"], "block");
+}
+
+#[test]
+fn hook_stays_quiet_outside_a_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let sentinel = temp.path().join("ran");
+    let stub = write_stub(temp.path(), "touch \"$SENTINEL\"");
+    let plain = temp.path().join("plain");
+    let unborn = temp.path().join("unborn");
+    let staged = temp.path().join("staged");
+    let ceiling = temp.path().join("outer/ceiling");
+    let ceiled = ceiling.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    fs::create_dir_all(&unborn).unwrap();
+    fs::create_dir_all(&staged).unwrap();
+    fs::create_dir_all(&ceiled).unwrap();
+    fs::write(temp.path().join("outer/.git"), "").unwrap();
+    git(&unborn, &["init", "-b", "main"]);
+    git(&staged, &["init", "-b", "main"]);
+    fs::write(staged.join("README"), "staged\n").unwrap();
+    git(&staged, &["add", "README"]);
+    let ceilings = format!("{}:{}", temp.path().display(), ceiling.display());
+    let marked = fs::canonicalize(&plain)
+        .unwrap()
+        .ancestors()
+        .any(|dir| [".git", "HEAD", "objects", "refs"].iter().any(|name| fs::symlink_metadata(dir.join(name)).is_ok()));
+    for trace in ["", "1"] {
+        let cwd = serde_json::to_string(plain.to_str().unwrap()).unwrap();
+        for event in ["Stop", "TaskCompleted"] {
+            let output = consult(
+                &plain,
+                &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"{event}\"}}"),
+                Some(&stub),
+                &[("SENTINEL", sentinel.to_str().unwrap()), ("GIT_CEILING_DIRECTORIES", temp.path().to_str().unwrap()), ("GIT_TRACE2", trace)],
+            );
+            let quiet = output.status.code() == Some(0) && output.stdout.is_empty();
+            assert_eq!(quiet, !marked, "{trace} {event} {}", String::from_utf8_lossy(&output.stdout));
+            assert!(!sentinel.exists());
+        }
+    }
+
+    let missing = serde_json::to_string(temp.path().join("missing").to_str().unwrap()).unwrap();
+    let output = consult(
+        temp.path(),
+        &format!("{{\"cwd\":{missing},\"hook_event_name\":\"Stop\"}}"),
+        Some(&stub),
+        &[("SENTINEL", sentinel.to_str().unwrap())],
+    );
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(parsed["decision"], "block");
+    assert!(!sentinel.exists());
+
+    let broken = temp.path().join("broken");
+    commit_repo(&broken);
+    fs::write(broken.join(".git/refs/heads/main"), "zzz\n").unwrap();
+    let lost = temp.path().join("lost");
+    commit_repo(&lost);
+    let head = String::from_utf8(Command::new("git").arg("-C").arg(&lost).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap();
+    let head = head.trim();
+    fs::remove_file(lost.join(".git/objects").join(&head[..2]).join(&head[2..])).unwrap();
+    let phrase = temp.path().join("not a git repository/missing");
+    let config = temp.path().join("config");
+    commit_repo(&config);
+    git(&config, &["config", "core.repositoryformatversion", "not a git repository"]);
+    let headless = temp.path().join("headless");
+    commit_repo(&headless);
+    fs::remove_file(headless.join(".git/HEAD")).unwrap();
+    let nested = headless.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let objectless = temp.path().join("objectless");
+    commit_repo(&objectless);
+    fs::remove_dir_all(objectless.join(".git/objects")).unwrap();
+    let dangling = temp.path().join("dangling");
+    fs::create_dir_all(&dangling).unwrap();
+    fs::write(dangling.join(".git"), format!("gitdir: {}\n", temp.path().join("gone/.git/worktrees/dangling").display())).unwrap();
+    let orphaned = temp.path().join("orphaned");
+    commit_repo(&orphaned);
+    git(&orphaned, &["branch", "retained"]);
+    fs::remove_file(orphaned.join(".git/refs/heads/main")).unwrap();
+    let erased = temp.path().join("erased");
+    commit_repo(&erased);
+    fs::remove_file(erased.join(".git/refs/heads/main")).unwrap();
+    fs::remove_dir_all(erased.join(".git/logs")).unwrap();
+    let linked = temp.path().join("linked");
+    commit_repo(&linked);
+    fs::rename(linked.join(".git"), linked.join(".saved-git")).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("nowhere"), linked.join(".git")).unwrap();
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&nested, &alias).unwrap();
+    let deep = temp.path().join("deep");
+    commit_repo(&deep);
+    fs::create_dir_all(deep.join("one/two/three")).unwrap();
+    fs::remove_file(deep.join(".git/HEAD")).unwrap();
+    std::os::unix::fs::symlink(deep.join("one/two/three"), temp.path().join("hop")).unwrap();
+    let climb = temp.path().join("hop/../../..");
+    let source = temp.path().join("source");
+    commit_repo(&source);
+    let mut bare = Vec::new();
+    for part in ["HEAD", "objects", "refs"] {
+        let dir = temp.path().join(format!("bare-without-{part}"));
+        git(temp.path(), &["clone", "--quiet", "--bare", source.to_str().unwrap(), dir.to_str().unwrap()]);
+        let path = dir.join(part);
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+        bare.push(dir);
+    }
+    for dir in [&broken, &lost, &phrase, &config, &headless, &nested, &objectless, &dangling, &orphaned, &erased, &linked, &alias, &unborn, &staged, &ceiled, &bare[0], &bare[1], &bare[2], &climb] {
+        let cwd = serde_json::to_string(dir.to_str().unwrap()).unwrap();
+        let output = consult(
+            temp.path(),
+            &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"),
+            Some(&stub),
+            &[("SENTINEL", sentinel.to_str().unwrap())],
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(parsed["decision"], "block", "{dir:?}");
+        assert!(!sentinel.exists());
+    }
+    let cwd = serde_json::to_string(ceiled.to_str().unwrap()).unwrap();
+    let output = consult(
+        &ceiled,
+        &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"),
+        Some(&stub),
+        &[("SENTINEL", sentinel.to_str().unwrap()), ("GIT_CEILING_DIRECTORIES", &ceilings)],
+    );
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(parsed["decision"], "block");
+    assert!(!sentinel.exists());
+
+    let node = Command::new("node").args(["-p", "process.execPath"]).current_dir(temp.path()).output().unwrap().stdout;
+    let node = PathBuf::from(String::from_utf8(node).unwrap().trim());
+    let odd = temp.path().join(std::ffi::OsStr::from_bytes(b"odd\xff"));
+    if fs::create_dir(&odd).is_ok() {
+        commit_repo(&odd);
+        fs::remove_file(odd.join(".git/HEAD")).unwrap();
+        let ascii = temp.path().join("ascii");
+        std::os::unix::fs::symlink(&odd, &ascii).unwrap();
+        let cwd = serde_json::to_string(ascii.to_str().unwrap()).unwrap();
+        let output = consult(
+            temp.path(),
+            &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"),
+            Some(&stub),
+            &[("SENTINEL", sentinel.to_str().unwrap())],
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert!(!sentinel.exists());
+
+        let decoded = temp.path().join("odd\u{FFFD}");
+        fs::create_dir_all(&decoded).unwrap();
+        let cwd = serde_json::to_string(decoded.to_str().unwrap()).unwrap();
+        let path = format!("{}:{}", node.parent().unwrap().display(), std::env::var("PATH").unwrap());
+        let legacy = temp.path().join("legacy.mjs");
+        fs::write(&legacy, "delete String.prototype.isWellFormed;\n").unwrap();
+        let options = format!("--import={}", legacy.display());
+        let surrogate = format!("{{\"cwd\":\"{}/odd\\udcff\",\"hook_event_name\":\"Stop\"}}", temp.path().display());
+        for input in ["{\"hook_event_name\":\"Stop\"}".to_string(), format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"), surrogate] {
+            let output = consult(&odd, &input, Some(&stub), &[("SENTINEL", sentinel.to_str().unwrap()), ("PATH", &path), ("NODE_OPTIONS", &options)]);
+            let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(parsed["decision"], "block", "{input}");
+            assert!(!sentinel.exists());
+        }
+    }
+
+    let resolved = temp.path().join("resolved");
+    std::os::unix::fs::symlink(&headless, &resolved).unwrap();
+    for ceilings in ["..".to_string(), format!(":{}", resolved.display())] {
+        let cwd = serde_json::to_string(nested.to_str().unwrap()).unwrap();
+        let output = consult(
+            &nested,
+            &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"),
+            Some(&stub),
+            &[("SENTINEL", sentinel.to_str().unwrap()), ("GIT_CEILING_DIRECTORIES", &ceilings)],
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(parsed["decision"], "block", "{ceilings}");
+        assert!(!sentinel.exists());
+    }
+
+    let repo = policy_repo(temp.path());
+    for dir in [&repo, &unborn, &plain] {
+        let cwd = serde_json::to_string(dir.to_str().unwrap()).unwrap();
+        let output = consult(
+            dir,
+            &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"),
+            Some(&stub),
+            &[("SENTINEL", sentinel.to_str().unwrap()), ("CLOSEOUT_BASE", "no-such-ref"), ("GIT_CEILING_DIRECTORIES", temp.path().to_str().unwrap())],
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(parsed["decision"], "block", "{dir:?}");
+        assert_eq!(parsed["reason"], "base or head does not resolve to a commit");
+        assert!(!sentinel.exists());
+    }
+
+    let external = temp.path().join("external");
+    git(temp.path(), &["clone", "--quiet", "--bare", source.to_str().unwrap(), external.to_str().unwrap()]);
+    git(&external, &["config", "core.repositoryformatversion", "broken\nfatal: not a git repository (or any of the parent directories): .git"]);
+    let cwd = serde_json::to_string(plain.to_str().unwrap()).unwrap();
+    let injected = "invalid\nfatal: not a git repository (or any of the parent directories): .git";
+    let gitless = temp.path().join("gitless");
+    fs::create_dir_all(&gitless).unwrap();
+    std::os::unix::fs::symlink(&node, gitless.join("node")).unwrap();
+    for env in [
+        ("GIT_DIR", external.to_str().unwrap()),
+        ("GIT_DIR", ""),
+        ("CLOSEOUT_BASE", ""),
+        ("GIT_DISCOVERY_ACROSS_FILESYSTEM", injected),
+        ("PATH", gitless.to_str().unwrap()),
+    ] {
+        let output = consult(
+            &plain,
+            &format!("{{\"cwd\":{cwd},\"hook_event_name\":\"Stop\"}}"),
+            Some(&stub),
+            &[("SENTINEL", sentinel.to_str().unwrap()), env, ("GIT_CEILING_DIRECTORIES", temp.path().to_str().unwrap())],
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(parsed["decision"], "block", "{env:?}");
+        assert!(!sentinel.exists());
+    }
 }
 
 #[test]
