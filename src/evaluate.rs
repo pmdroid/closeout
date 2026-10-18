@@ -3,7 +3,7 @@ use crate::types::{
     Candidate, CommandRecord, Decision, DecisionName, EvidenceRecord, ExecInfo, Gate, Item, ItemBody, ItemResult, ItemState,
     PolicyInfo, ResolvedPolicy, RetryScope, ReviewRecord, Severity, SPEC_VERSION, PRODUCER_NAME, VERSION,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct EvaluateInput<'a> {
     pub policy: &'a ResolvedPolicy,
@@ -203,6 +203,7 @@ pub fn retry_block(
     let digest = policy.digest.as_deref().unwrap_or("");
     let mut seen = HashSet::new();
     let mut failed = 0;
+    let mut repeats: HashMap<&str, u64> = HashMap::new();
     for record in records.iter().filter(|record| {
         record.item_id() == item.id && record.policy_digest() == digest && match retry.scope {
             RetryScope::Task => !candidate.task.is_empty() && record.task() == candidate.task,
@@ -222,17 +223,45 @@ pub fn retry_block(
             _ => false,
         };
         failed += u64::from(counts);
+        if let (true, ItemBody::Review { fail_on, .. }, EvidenceRecord::Review(record)) = (counts, &item.body, record) {
+            let keys: HashSet<&str> = record.findings.iter()
+                .filter(|finding| finding.severity.rank() <= fail_on.rank())
+                .map(|finding| finding_key(&finding.location))
+                .collect();
+            for key in keys {
+                *repeats.entry(key).or_default() += 1;
+            }
+        }
     }
-    if failed < retry.max_failed_attempts_per_item {
-        return None;
-    }
+    let message = match (&item.body, retry.max_failed_review_attempts) {
+        (ItemBody::Review { .. }, Some(cap)) if failed >= cap => format!("{failed} of {cap} allowed failed review attempts used."),
+        (ItemBody::Review { .. }, Some(_)) => {
+            let (key, count) = repeats.into_iter()
+                .filter(|(_, count)| *count >= retry.max_failed_attempts_per_item)
+                .min()?;
+            format!("{key} failed in {count} of {} allowed review attempts.", retry.max_failed_attempts_per_item)
+        }
+        _ if failed >= retry.max_failed_attempts_per_item => format!("{failed} of {} allowed failed attempts used.", retry.max_failed_attempts_per_item),
+        _ => return None,
+    };
     Some(ItemResult {
         id: item.id.clone(),
         kind: item.kind_name().to_string(),
         state: ItemState::Exhausted,
-        message: format!("{failed} of {} allowed failed attempts used. Stop retrying and ask for help.", retry.max_failed_attempts_per_item),
+        message: format!("{message} Stop retrying and ask for help."),
         attempt: None,
     })
+}
+
+fn finding_key(location: &str) -> &str {
+    let mut key = location.trim();
+    for _ in 0..2 {
+        match key.rsplit_once(':') {
+            Some((path, line)) if !path.is_empty() && !line.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit()) => key = path,
+            _ => break,
+        }
+    }
+    key
 }
 
 fn kind_mismatch(item: &Item, attempt: u64) -> ItemResult {
