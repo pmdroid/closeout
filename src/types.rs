@@ -167,6 +167,8 @@ pub struct RetryPolicy {
     #[serde(rename = "maxFailedAttemptsPerItem")]
     pub max_failed_attempts_per_item: u64,
     pub scope: RetryScope,
+    #[serde(rename = "maxFailedReviewAttempts", default, skip_serializing_if = "Option::is_none")]
+    pub max_failed_review_attempts: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

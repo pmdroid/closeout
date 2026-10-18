@@ -252,6 +252,42 @@ items:
 }
 
 #[test]
+fn review_budget_spends_only_on_repeated_findings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join(".agents/skills/review")).unwrap();
+    fs::write(repo.join(".agents/skills/review/SKILL.md"), "Review the change.\n").unwrap();
+    fs::write(repo.join(".agents/closeout.yaml"), r#"specVersion: "0.1"
+retry:
+  maxFailedAttemptsPerItem: 2
+  scope: task
+  maxFailedReviewAttempts: 4
+items:
+  - id: review
+    kind: review
+    gate: beforePR
+    skill: .agents/skills/review/SKILL.md
+    independence:
+      differentSession: false
+      differentModel: false
+    failOn: P1
+"#).unwrap();
+    commit_repo(&repo);
+    publish_origin(&repo);
+    let findings = temp.path().join("findings.json");
+    let args = ["evidence", "add", "--gate", "beforePR", "--item", "review", "--base", "HEAD", "--head", "HEAD", "--task", "task-one", "--session", "reviewer", "--model", "model", "--findings", findings.to_str().unwrap()];
+    for location in ["src/a.rs:3", "src/b.rs", "src/a.rs:40"] {
+        fs::write(&findings, format!(r#"[{{"severity":"P1","location":"{location}","explanation":"fails","evidence":"failure"}}]"#)).unwrap();
+        assert_eq!(closeout(&repo, &args).status.code(), Some(0), "{location}");
+    }
+    fs::write(&findings, "[]").unwrap();
+    let refused = closeout(&repo, &args);
+    assert_eq!(refused.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("src/a.rs failed in 2 of 2 allowed review attempts"));
+    assert_eq!(read_evidence(&repo.join(".closeout")).unwrap().len(), 3);
+}
+
+#[test]
 fn concurrent_runs_cannot_spend_the_same_retry_budget() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
