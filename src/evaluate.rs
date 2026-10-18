@@ -3,7 +3,7 @@ use crate::types::{
     Candidate, CommandRecord, Decision, DecisionName, EvidenceRecord, ExecInfo, Gate, Item, ItemBody, ItemResult, ItemState,
     PolicyInfo, ResolvedPolicy, RetryScope, ReviewRecord, Severity, SPEC_VERSION, PRODUCER_NAME, VERSION,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct EvaluateInput<'a> {
     pub policy: &'a ResolvedPolicy,
@@ -203,6 +203,7 @@ pub fn retry_block(
     let digest = policy.digest.as_deref().unwrap_or("");
     let mut seen = HashSet::new();
     let mut failed = 0;
+    let mut repeats: HashMap<&str, u64> = HashMap::new();
     for record in records.iter().filter(|record| {
         record.item_id() == item.id && record.policy_digest() == digest && match retry.scope {
             RetryScope::Task => !candidate.task.is_empty() && record.task() == candidate.task,
@@ -222,17 +223,45 @@ pub fn retry_block(
             _ => false,
         };
         failed += u64::from(counts);
+        if let (true, ItemBody::Review { fail_on, .. }, EvidenceRecord::Review(record)) = (counts, &item.body, record) {
+            let keys: HashSet<&str> = record.findings.iter()
+                .filter(|finding| finding.severity.rank() <= fail_on.rank())
+                .map(|finding| finding_key(&finding.location))
+                .collect();
+            for key in keys {
+                *repeats.entry(key).or_default() += 1;
+            }
+        }
     }
-    if failed < retry.max_failed_attempts_per_item {
-        return None;
-    }
+    let message = match (&item.body, retry.max_failed_review_attempts) {
+        (ItemBody::Review { .. }, Some(cap)) if failed >= cap => format!("{failed} of {cap} allowed failed review attempts used."),
+        (ItemBody::Review { .. }, Some(_)) => {
+            let (key, count) = repeats.into_iter()
+                .filter(|(_, count)| *count >= retry.max_failed_attempts_per_item)
+                .min()?;
+            format!("{key} failed in {count} of {} allowed review attempts.", retry.max_failed_attempts_per_item)
+        }
+        _ if failed >= retry.max_failed_attempts_per_item => format!("{failed} of {} allowed failed attempts used.", retry.max_failed_attempts_per_item),
+        _ => return None,
+    };
     Some(ItemResult {
         id: item.id.clone(),
         kind: item.kind_name().to_string(),
         state: ItemState::Exhausted,
-        message: format!("{failed} of {} allowed failed attempts used. Stop retrying and ask for help.", retry.max_failed_attempts_per_item),
+        message: format!("{message} Stop retrying and ask for help."),
         attempt: None,
     })
+}
+
+fn finding_key(location: &str) -> &str {
+    let mut key = location.trim();
+    for _ in 0..2 {
+        match key.rsplit_once(':') {
+            Some((path, line)) if !path.is_empty() && !line.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit()) => key = path,
+            _ => break,
+        }
+    }
+    key
 }
 
 fn kind_mismatch(item: &Item, attempt: u64) -> ItemResult {
@@ -450,7 +479,7 @@ mod tests {
     #[test]
     fn retry_counts_only_failed_evidence_in_the_selected_scope() {
         let mut loaded = policy(vec![Item::command("check", vec!["true".to_string()], 30)]);
-        loaded.retry = Some(crate::types::RetryPolicy { max_failed_attempts_per_item: 1, scope: RetryScope::Candidate });
+        loaded.retry = Some(crate::types::RetryPolicy { max_failed_attempts_per_item: 1, scope: RetryScope::Candidate, max_failed_review_attempts: None });
         let mut untrusted = command_record(&["true"], Some(1), false, false, false);
         if let EvidenceRecord::Command(record) = &mut untrusted {
             record.producer.name = "unknown".to_string();
@@ -474,6 +503,43 @@ mod tests {
         assert!(retry_block(&loaded, &loaded.items[0], "new-base", "new-head", &candidate, &[failed.clone()]).is_some());
         candidate.task = "task-two".to_string();
         assert!(retry_block(&loaded, &loaded.items[0], "new-base", "new-head", &candidate, &[failed]).is_none());
+    }
+
+    #[test]
+    fn review_budget_counts_repeated_findings_and_caps_total_failures() {
+        let item = Item::review(
+            "adversarial-review",
+            ".agents/skills/adversarial-review/SKILL.md",
+            Independence { different_session: true, different_model: true },
+            Severity::P1,
+        );
+        let mut loaded = policy(vec![item]);
+        loaded.retry = Some(crate::types::RetryPolicy { max_failed_attempts_per_item: 2, scope: RetryScope::Candidate, max_failed_review_attempts: Some(4) });
+        let attempt = |number: u64, findings: Vec<(Severity, &str)>| {
+            let mut record = review_record("reviewer", "model-b", findings.into_iter().map(|(severity, location)| Finding { location: location.to_string(), ..finding(severity) }).collect());
+            if let EvidenceRecord::Review(review) = &mut record {
+                review.attempt = number;
+            }
+            record
+        };
+        let block = |loaded: &ResolvedPolicy, records: &[EvidenceRecord]| retry_block(loaded, &loaded.items[0], "b", "h", &candidate(), records);
+        let progressing = [attempt(1, vec![(Severity::P1, "src/a.rs:12")]), attempt(2, vec![(Severity::P0, "src/b.rs")]), attempt(3, vec![(Severity::P1, "src/c.rs:4:2"), (Severity::P1, "src/c.rs:9")])];
+        assert!(block(&loaded, &progressing).is_none());
+        let repeated = [attempt(1, vec![(Severity::P1, "src/a.rs:12")]), attempt(2, vec![(Severity::P1, " src/a.rs:40:7 ")])];
+        let exhausted = block(&loaded, &repeated).unwrap();
+        assert_eq!(exhausted.state, ItemState::Exhausted);
+        assert_eq!(exhausted.message, "src/a.rs failed in 2 of 2 allowed review attempts. Stop retrying and ask for help.");
+        let below_fail_on = [attempt(1, vec![(Severity::P1, "src/a.rs")]), attempt(2, vec![(Severity::P1, "src/b.rs"), (Severity::P2, "src/a.rs")])];
+        assert!(block(&loaded, &below_fail_on).is_none());
+        let capped = [
+            attempt(1, vec![(Severity::P1, "src/a.rs")]),
+            attempt(2, vec![(Severity::P1, "src/b.rs")]),
+            attempt(3, vec![(Severity::P1, "src/c.rs")]),
+            attempt(4, vec![(Severity::P1, "src/d.rs")]),
+        ];
+        assert_eq!(block(&loaded, &capped).unwrap().message, "4 of 4 allowed failed review attempts used. Stop retrying and ask for help.");
+        loaded.retry.as_mut().unwrap().max_failed_review_attempts = None;
+        assert_eq!(block(&loaded, &progressing[..2]).unwrap().message, "2 of 2 allowed failed attempts used. Stop retrying and ask for help.");
     }
 
     #[test]
@@ -615,7 +681,7 @@ mod tests {
         assert_eq!(decision.items[0].state, ItemState::Failed);
         assert_eq!(decision.items[0].kind, "setup");
         assert_eq!(decision.items[1].state, ItemState::Skipped);
-        loaded.retry = Some(crate::types::RetryPolicy { max_failed_attempts_per_item: 1, scope: RetryScope::Candidate });
+        loaded.retry = Some(crate::types::RetryPolicy { max_failed_attempts_per_item: 1, scope: RetryScope::Candidate, max_failed_review_attempts: None });
         let mut failed = command_record(&["false"], Some(1), false, false, false);
         if let EvidenceRecord::Command(record) = &mut failed {
             record.item_id = "install".to_string();

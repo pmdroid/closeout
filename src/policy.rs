@@ -262,6 +262,9 @@ fn walk(
     if !prefix.is_empty() && document.retry.is_some() {
         return Err("retry is only allowed on the entry policy".to_string());
     }
+    if document.retry.as_ref().is_some_and(|retry| retry.max_failed_review_attempts.is_some_and(|cap| cap < retry.max_failed_attempts_per_item)) {
+        return Err("maxFailedReviewAttempts must be at least maxFailedAttemptsPerItem".to_string());
+    }
     if prefix.is_empty() {
         *retry = document.retry;
     }
@@ -564,6 +567,16 @@ mod tests {
         let LoadResult::Ready(after) = load_policy(root) else { panic!("retry should load"); };
         assert_ne!(before.digest, after.digest);
         let canonical: Value = serde_json::from_str(&canonical_policy_body(&after).unwrap()).unwrap();
+        assert_eq!(canonical["retry"], document["retry"]);
+        document["retry"]["maxFailedReviewAttempts"] = json!(2);
+        fs::write(&path, document.to_string()).unwrap();
+        let LoadResult::Failed { message, .. } = load_policy(root) else { panic!("a review cap below the limit should fail"); };
+        assert_eq!(message, "maxFailedReviewAttempts must be at least maxFailedAttemptsPerItem");
+        document["retry"]["maxFailedReviewAttempts"] = json!(8);
+        fs::write(&path, document.to_string()).unwrap();
+        let LoadResult::Ready(capped) = load_policy(root) else { panic!("review cap should load"); };
+        assert_ne!(capped.digest, after.digest);
+        let canonical: Value = serde_json::from_str(&canonical_policy_body(&capped).unwrap()).unwrap();
         assert_eq!(canonical["retry"], document["retry"]);
         fs::write(root.join(".agents/closeout/child.yaml"), document.to_string()).unwrap();
         fs::write(&path, "specVersion: \"0.1\"\nimports:\n  - path: .agents/closeout/child.yaml\n    as: child\n").unwrap();
